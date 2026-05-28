@@ -1,0 +1,22 @@
+# Claves secretas — nunca subir a internet
+.env
+
+# Entornos virtuales de Python
+.venv/
+venv/
+env/
+
+# Archivos compilados de Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Caché de Streamlit
+.streamlit/
+
+# Configuración local de herramientas de desarrollo
+.claude/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
