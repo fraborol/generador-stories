@@ -6,6 +6,7 @@ import unicodedata
 import base64
 
 import anthropic
+from json_repair import repair_json
 from dotenv import load_dotenv
 
 # Forzar UTF-8 en la salida del terminal (necesario en Windows)
@@ -39,6 +40,17 @@ ANGULOS = [
     "el ritual del tardeo",
     "el equipo y el servicio",
 ]
+
+# Instrucción de prevención que se añade al final de las INSTRUCCIONES DE FORMATO
+# de todos los prompts de generación y refinamiento.
+# La IA tiende a incluir comillas dobles sin escapar dentro de los valores del JSON
+# (por ejemplo en diálogos), lo que rompe json.loads con "Expecting ',' delimiter".
+_INSTRUCCION_JSON_COMILLAS = (
+    "\n\nIMPORTANTE: dentro de los valores de texto del JSON, NO uses comillas dobles "
+    '(") en ningún caso. Si necesitas representar comillas en el texto en pantalla o '
+    "en cualquier otro campo, usa comillas tipográficas españolas («…») o comillas "
+    "simples (' '). El JSON debe poder parsearse sin errores."
+)
 
 
 def _nombre_a_slug(nombre_cliente):
@@ -233,7 +245,7 @@ El JSON debe ser una lista de 3 objetos con exactamente esta estructura:
   }}
 ]"""
 
-    return prompt
+    return prompt + _INSTRUCCION_JSON_COMILLAS
 
 
 def _llamar_api(prompt, temperatura):
@@ -303,6 +315,68 @@ def _llamar_api(prompt, temperatura):
     return respuesta.content[0].text
 
 
+def _parsear_lista_json(texto_respuesta):
+    """
+    Extrae el primer array JSON de la respuesta de la IA y lo parsea.
+
+    Estrategia de dos intentos:
+      1. json.loads normal (rápido, sin coste).
+      2. Si falla, repair_json intenta corregir problemas comunes (comillas sin
+         escapar, comas sobrantes, llaves mal cerradas) antes de parsear de nuevo.
+      3. Si tampoco funciona, lanza ValueError con el fragmento recibido.
+    """
+    inicio = texto_respuesta.find("[")
+    fin    = texto_respuesta.rfind("]")
+
+    if inicio == -1 or fin == -1:
+        raise ValueError(
+            "La respuesta de la IA no contiene un JSON válido. "
+            f"Respuesta recibida:\n{texto_respuesta}"
+        )
+
+    fragmento = texto_respuesta[inicio:fin + 1]
+
+    try:
+        return json.loads(fragmento)
+    except json.JSONDecodeError:
+        # Segundo intento: reparación automática con json_repair
+        try:
+            return json.loads(repair_json(fragmento))
+        except Exception:
+            raise ValueError(
+                "La respuesta de la IA contiene JSON mal formado y no se pudo reparar. "
+                f"Fragmento recibido:\n{fragmento}"
+            )
+
+
+def _parsear_objeto_json(texto_respuesta):
+    """
+    Extrae el primer objeto JSON de la respuesta de la IA y lo parsea.
+    Mismo mecanismo de dos intentos que _parsear_lista_json, pero para {…}.
+    """
+    inicio = texto_respuesta.find("{")
+    fin    = texto_respuesta.rfind("}")
+
+    if inicio == -1 or fin == -1:
+        raise ValueError(
+            "La respuesta de la IA no contiene un JSON válido. "
+            f"Respuesta recibida:\n{texto_respuesta}"
+        )
+
+    fragmento = texto_respuesta[inicio:fin + 1]
+
+    try:
+        return json.loads(fragmento)
+    except json.JSONDecodeError:
+        try:
+            return json.loads(repair_json(fragmento))
+        except Exception:
+            raise ValueError(
+                "La respuesta de la IA contiene JSON mal formado y no se pudo reparar. "
+                f"Fragmento recibido:\n{fragmento}"
+            )
+
+
 def generar_ideas(prompt, nivel_creatividad="equilibradas"):
     """
     Envía el prompt a la API de Anthropic y devuelve una lista de 3 ideas
@@ -323,30 +397,11 @@ def generar_ideas(prompt, nivel_creatividad="equilibradas"):
 
     temperatura = NIVELES_CREATIVIDAD[nivel_creatividad]
 
-    # ── Llamar a la API y extraer el JSON de la respuesta ─────────────────
-    # La IA a veces añade texto introductorio antes del JSON.
-    # Buscamos el primer '[' y el último ']' para extraer solo la lista.
+    # ── Llamar a la API y parsear la respuesta ────────────────────────────
+    # _parsear_lista_json extrae el array JSON y, si json.loads falla, intenta
+    # repararlo con json_repair antes de propagar el error.
     texto_respuesta = _llamar_api(prompt, temperatura)
-
-    inicio = texto_respuesta.find("[")
-    fin    = texto_respuesta.rfind("]")
-
-    if inicio == -1 or fin == -1:
-        raise ValueError(
-            "La respuesta de la IA no contiene un JSON válido. "
-            f"Respuesta recibida:\n{texto_respuesta}"
-        )
-
-    fragmento_json = texto_respuesta[inicio: fin + 1]
-
-    try:
-        ideas = json.loads(fragmento_json)
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            f"La respuesta de la IA contiene JSON mal formado y no se pudo parsear. "
-            f"Detalle: {e}\nFragmento recibido:\n{fragmento_json}"
-        )
-
+    ideas = _parsear_lista_json(texto_respuesta)
     return ideas
 
 
@@ -407,7 +462,7 @@ El JSON debe ser un único objeto con exactamente esta estructura:
   "por_que_funciona": "Explicación breve de por qué esta idea conecta con el público"
 }}"""
 
-    return prompt
+    return prompt + _INSTRUCCION_JSON_COMILLAS
 
 
 def refinar_idea(idea, peticion_cambio, nivel_creatividad="equilibradas"):
@@ -436,32 +491,16 @@ def refinar_idea(idea, peticion_cambio, nivel_creatividad="equilibradas"):
     texto_respuesta = _llamar_api(prompt, temperatura)
 
     # ── Extraer el objeto JSON de la respuesta ─────────────────────────────
-    # A diferencia de generar_ideas, aquí esperamos un objeto { }, no una lista [ ]
-    inicio = texto_respuesta.find("{")
-    fin    = texto_respuesta.rfind("}")
-
-    if inicio == -1 or fin == -1:
-        raise ValueError(
-            "La respuesta de la IA no contiene un JSON válido. "
-            f"Respuesta recibida:\n{texto_respuesta}"
-        )
-
-    fragmento_json = texto_respuesta[inicio: fin + 1]
-
-    try:
-        idea_revisada = json.loads(fragmento_json)
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            f"La respuesta de la IA contiene JSON mal formado y no se pudo parsear. "
-            f"Detalle: {e}\nFragmento recibido:\n{fragmento_json}"
-        )
-
+    # _parsear_objeto_json extrae el {…} y aplica repair_json si es necesario.
+    idea_revisada = _parsear_objeto_json(texto_respuesta)
     return idea_revisada
 
 
-# ── Constante de prueba del Modo A ────────────────────────────────────────────
+# ── Constantes de prueba ──────────────────────────────────────────────────────
 # Cambia a True para activar el bloque de prueba de foto al ejecutar el script.
 PROBAR_FOTO = False
+# Cambia a True para activar el bloque de los cuatro modos flexibles.
+PROBAR_FLEXIBLE = False
 
 
 # Extensiones de imagen soportadas por la API de visión de Anthropic
@@ -527,10 +566,20 @@ Tono de comunicación: {tono}
 Público objetivo: {publico}{bloque_valores}{bloque_evitar}
 
 Se te adjunta una imagen relacionada con este cliente. Obsérvala con atención.
-Tu tarea es proponer exactamente 3 ideas de Story de Instagram para convertir ESA imagen
-concreta en Stories para {cliente}. El campo "tipo_contenido_sugerido" debe describir
-cómo encuadrar o usar lo que se ve en la foto (no el tipo de formato genérico, sino
-qué mostrar y cómo trabajarlo visualmente).{bloque_previas}
+
+IMPORTANTE — LA FOTO YA ESTÁ HECHA Y ES DEFINITIVA:
+No puedes cambiar la composición, reencuadrar la escena ni recolocar elementos.
+Trabaja siempre con la foto TAL CUAL existe. No propongas "un primer plano de X",
+"situar Y a la izquierda" ni ningún otro cambio de encuadre o composición.
+
+Tu tarea es proponer exactamente 3 ideas de Story de Instagram usando ESA imagen
+concreta para {cliente}.
+
+El campo "tratamiento_imagen" debe indicar SOLO cómo usar o presentar la foto tal
+como es. Ejemplos válidos: recorte al formato 9:16 vertical o cuadrado, formato
+final (foto estática / Boomerang / vídeo con zoom suave), retoque sutil (filtro
+cálido, viñeteado, blanco y negro…) y cómo colocar el texto encima. NUNCA
+propongas encuadres alternativos ni cambios de composición.{bloque_previas}
 
 INSTRUCCIONES DE FORMATO:
 Responde ÚNICAMENTE con un JSON válido, sin ningún texto adicional antes ni después.
@@ -540,7 +589,7 @@ El JSON debe ser una lista de 3 objetos con exactamente esta estructura:
   {{
     "idea": 1,
     "concepto": "Descripción breve de la idea central de la Story",
-    "tipo_contenido_sugerido": "Cómo encuadrar o trabajar visualmente lo que aparece en la foto",
+    "tratamiento_imagen": "Recorte (ej. 9:16 vertical), formato (foto estática / Boomerang / zoom suave), retoque (filtro cálido / b&n…) y posición del texto",
     "texto_en_pantalla": "El copy exacto que aparecería escrito en la Story",
     "elemento_interactivo": "Encuesta / Pregunta / Cuenta atrás / Ninguno / etc.",
     "por_que_funciona": "Explicación breve de por qué esta idea conecta con el público"
@@ -548,7 +597,7 @@ El JSON debe ser una lista de 3 objetos con exactamente esta estructura:
   {{
     "idea": 2,
     "concepto": "...",
-    "tipo_contenido_sugerido": "...",
+    "tratamiento_imagen": "...",
     "texto_en_pantalla": "...",
     "elemento_interactivo": "...",
     "por_que_funciona": "..."
@@ -556,14 +605,14 @@ El JSON debe ser una lista de 3 objetos con exactamente esta estructura:
   {{
     "idea": 3,
     "concepto": "...",
-    "tipo_contenido_sugerido": "...",
+    "tratamiento_imagen": "...",
     "texto_en_pantalla": "...",
     "elemento_interactivo": "...",
     "por_que_funciona": "..."
   }}
 ]"""
 
-    return prompt
+    return prompt + _INSTRUCCION_JSON_COMILLAS
 
 
 def generar_ideas_desde_foto(ruta_imagen, brand_kit, nivel_creatividad="equilibradas",
@@ -631,31 +680,318 @@ def generar_ideas_desde_foto(ruta_imagen, brand_kit, nivel_creatividad="equilibr
         },
     ]
 
-    # ── Llamar a la API reutilizando el helper compartido ──────────────────
+    # ── Llamar a la API y parsear la respuesta ────────────────────────────
     # _llamar_api acepta tanto un string como una lista de bloques de contenido.
+    # _parsear_lista_json aplica repair_json si json.loads falla a la primera.
     texto_respuesta = _llamar_api(contenido_mensaje, temperatura)
-
-    # ── Extraer y parsear el JSON de la respuesta ──────────────────────────
-    inicio = texto_respuesta.find("[")
-    fin    = texto_respuesta.rfind("]")
-
-    if inicio == -1 or fin == -1:
-        raise ValueError(
-            "La respuesta de la IA no contiene un JSON válido. "
-            f"Respuesta recibida:\n{texto_respuesta}"
-        )
-
-    fragmento_json = texto_respuesta[inicio: fin + 1]
-
-    try:
-        ideas = json.loads(fragmento_json)
-    except json.JSONDecodeError as e:
-        raise ValueError(
-            f"La respuesta de la IA contiene JSON mal formado y no se pudo parsear. "
-            f"Detalle: {e}\nFragmento recibido:\n{fragmento_json}"
-        )
-
+    ideas = _parsear_lista_json(texto_respuesta)
     return ideas
+
+
+def _construir_prompt_flexible(brand_kit, hay_imagen, descripcion=None,
+                                historial_conceptos=None, angulo=None,
+                                ideas_previas=None):
+    """
+    Construye el texto del prompt de forma modular para generar_ideas_flexible.
+
+    Ensambla solo los bloques que correspondan según los parámetros:
+      hay_imagen          → instrucciones "foto ya hecha" + campo tratamiento_imagen
+      descripcion         → bloque TEMA PRIORITARIO (Modo C y A+)
+      historial_conceptos → anti-repetición del historial del cliente (Modo B)
+      angulo              → ángulo temático (Modo B)
+      ideas_previas       → anti-repetición gestionada por el llamador (A, A+, C)
+
+    Devuelve:
+      str: Texto del prompt listo para enviar a la API. La imagen, si la hay,
+           se adjunta por separado en el bloque multimodal del mensaje.
+    """
+
+    # ── Campos de la ficha del cliente ─────────────────────────────────────
+    cliente            = brand_kit["cliente"]
+    sector             = brand_kit["sector"]
+    tono               = brand_kit["tono"]
+    publico            = brand_kit["publico"]
+    valores            = brand_kit.get("valores", [])
+    evitar             = brand_kit.get("evitar", [])
+    contenido_habitual = brand_kit.get("contenido_habitual", "")
+
+    # ── Bloques de identidad de marca ──────────────────────────────────────
+    bloque_valores = ""
+    if valores:
+        items = "\n".join(f"  - {v}" for v in valores)
+        bloque_valores = f"\nValores de marca:\n{items}"
+
+    bloque_evitar = ""
+    if evitar:
+        items = "\n".join(f"  - {e}" for e in evitar)
+        bloque_evitar = f"\nCosas a evitar:\n{items}"
+
+    # Contenido habitual: solo en modos sin imagen (ayuda al modelo a generar ideas)
+    bloque_contenido = ""
+    if not hay_imagen and contenido_habitual:
+        bloque_contenido = f"\nTipos de contenido habitual del cliente:\n  {contenido_habitual}"
+
+    # ── Bloque de descripción — eje central en Modo C y A+ ─────────────────
+    # Se coloca antes de las instrucciones de imagen para establecer prioridad.
+    bloque_descripcion = ""
+    if descripcion:
+        bloque_descripcion = (
+            f"\nTEMA O EVENTO A TRATAR (PRIORITARIO):\n"
+            f"{descripcion}\n"
+            f"Las 3 ideas deben girar alrededor de este tema. "
+            f"Es el eje central, no una pista secundaria."
+        )
+
+    # ── Bloque de imagen — Modo A y A+ ─────────────────────────────────────
+    # Recuerda a la IA que la foto ya está hecha y prohíbe proponer reencuadres.
+    bloque_imagen = ""
+    if hay_imagen:
+        bloque_imagen = (
+            "\n\nSe te adjunta una imagen relacionada con este cliente. "
+            "Obsérvala con atención.\n"
+            "\nIMPORTANTE — LA FOTO YA ESTÁ HECHA Y ES DEFINITIVA:\n"
+            "No puedes cambiar la composición, reencuadrar la escena ni recolocar elementos.\n"
+            'Trabaja siempre con la foto TAL CUAL existe. No propongas "un primer plano de X",\n'
+            '"situar Y a la izquierda" ni ningún otro cambio de encuadre o composición.\n'
+            '\nEl campo "tratamiento_imagen" debe indicar SOLO cómo usar o presentar la foto tal\n'
+            "como es. Ejemplos válidos: recorte al formato 9:16 vertical o cuadrado, formato\n"
+            "final (foto estática / Boomerang / vídeo con zoom suave), retoque sutil (filtro\n"
+            "cálido, viñeteado, blanco y negro…) y cómo colocar el texto encima. NUNCA\n"
+            "propongas encuadres alternativos ni cambios de composición."
+        )
+
+    # ── Bloque de historial — solo Modo B ──────────────────────────────────
+    bloque_historial = ""
+    if historial_conceptos:
+        recientes = historial_conceptos[-MAX_HISTORIAL_EN_PROMPT:]
+        items = "\n".join(f"  - {c}" for c in recientes)
+        bloque_historial = (
+            f"\nIDEAS YA PROPUESTAS ANTERIORMENTE (NO repitas ninguna ni propongas "
+            f"ideas muy parecidas a estas):\n{items}"
+        )
+
+    # ── Bloque de ángulo — solo Modo B ─────────────────────────────────────
+    bloque_angulo = ""
+    if angulo:
+        bloque_angulo = (
+            f"\nÁNGULO TEMÁTICO PARA ESTA GENERACIÓN:\n"
+            f"Enfoca las 3 ideas en torno a: {angulo}"
+        )
+
+    # ── Bloque de ideas previas — Modo A, A+ y opcionalmente C ─────────────
+    # Etiqueta adaptada según si hay imagen (foto) o no (tema/sesión).
+    bloque_previas = ""
+    if ideas_previas:
+        etiq = "IDEAS YA PROPUESTAS PARA ESTA FOTO" if hay_imagen else "IDEAS YA PROPUESTAS PARA ESTE TEMA"
+        items = "\n".join(f"  - {i}" for i in ideas_previas)
+        bloque_previas = (
+            f"\n{etiq} (NO repitas ninguna ni propongas "
+            f"ideas muy parecidas; busca enfoques claramente distintos):\n{items}"
+        )
+
+    # ── Instrucción de tarea — varía según el modo ─────────────────────────
+    if hay_imagen and descripcion:
+        # Modo A+: foto + tema → la foto es el vehículo, el tema el eje
+        tarea = (
+            f"Tu tarea es proponer exactamente 3 ideas de Story de Instagram usando "
+            f"ESA imagen concreta para {cliente}, con el tema indicado como eje central."
+        )
+    elif hay_imagen:
+        # Modo A: solo foto
+        tarea = (
+            f"Tu tarea es proponer exactamente 3 ideas de Story de Instagram usando "
+            f"ESA imagen concreta para {cliente}."
+        )
+    elif descripcion:
+        # Modo C: solo tema
+        tarea = (
+            f"Tu tarea es generar exactamente 3 ideas originales y creativas de Story "
+            f"de Instagram para {cliente} centradas en el tema indicado."
+        )
+    else:
+        # Modo B: lluvia libre con rotación de ángulos
+        tarea = (
+            f"Tu tarea es generar exactamente 3 ideas originales y creativas de Story "
+            f"de Instagram para este cliente."
+        )
+
+    # ── Plantilla JSON: el campo visual cambia según si hay imagen o no ─────
+    # Con imagen → "tratamiento_imagen" (cómo usar la foto tal cual existe)
+    # Sin imagen → "tipo_contenido_sugerido" (qué tipo de pieza crear)
+    if hay_imagen:
+        nombre_campo  = "tratamiento_imagen"
+        desc_campo_1  = (
+            "Recorte (ej. 9:16 vertical), formato (foto estática / Boomerang / zoom suave), "
+            "retoque (filtro cálido / b&n…) y posición del texto"
+        )
+    else:
+        nombre_campo  = "tipo_contenido_sugerido"
+        desc_campo_1  = "Foto / Vídeo / Reel / Boomerang / etc."
+
+    # Construimos la plantilla como string normal para no mezclar {{ }} de f-string
+    # con las llaves reales del JSON del ejemplo.
+    json_template = (
+        "[\n"
+        "  {\n"
+        '    "idea": 1,\n'
+        '    "concepto": "Descripción breve de la idea central de la Story",\n'
+        f'    "{nombre_campo}": "{desc_campo_1}",\n'
+        '    "texto_en_pantalla": "El copy exacto que aparecería escrito en la Story",\n'
+        '    "elemento_interactivo": "Encuesta / Pregunta / Cuenta atrás / Ninguno / etc.",\n'
+        '    "por_que_funciona": "Explicación breve de por qué esta idea conecta con el público"\n'
+        "  },\n"
+        "  {\n"
+        '    "idea": 2,\n'
+        '    "concepto": "...",\n'
+        f'    "{nombre_campo}": "...",\n'
+        '    "texto_en_pantalla": "...",\n'
+        '    "elemento_interactivo": "...",\n'
+        '    "por_que_funciona": "..."\n'
+        "  },\n"
+        "  {\n"
+        '    "idea": 3,\n'
+        '    "concepto": "...",\n'
+        f'    "{nombre_campo}": "...",\n'
+        '    "texto_en_pantalla": "...",\n'
+        '    "elemento_interactivo": "...",\n'
+        '    "por_que_funciona": "..."\n'
+        "  }\n"
+        "]"
+    )
+
+    # ── Ensamblado final ────────────────────────────────────────────────────
+    prompt = (
+        "Eres una experta en crear Stories de Instagram para marcas y negocios.\n\n"
+        "Trabaja para el siguiente cliente:\n\n"
+        f"Cliente: {cliente}\n"
+        f"Sector: {sector}\n"
+        f"Tono de comunicación: {tono}\n"
+        f"Público objetivo: {publico}"
+        f"{bloque_valores}{bloque_evitar}{bloque_contenido}"
+        f"{bloque_descripcion}{bloque_imagen}"
+        f"{bloque_historial}{bloque_angulo}{bloque_previas}\n\n"
+        f"{tarea}\n\n"
+        "INSTRUCCIONES DE FORMATO:\n"
+        "Responde ÚNICAMENTE con un JSON válido, sin ningún texto adicional antes ni después.\n"
+        "El JSON debe ser una lista de 3 objetos con exactamente esta estructura:\n\n"
+        + json_template
+    )
+
+    return prompt + _INSTRUCCION_JSON_COMILLAS
+
+
+def generar_ideas_flexible(brand_kit, nivel_creatividad, ruta_imagen=None,
+                            descripcion=None, ideas_previas=None):
+    """
+    Punto de entrada unificado para todos los modos de generación de ideas.
+    Elige el modo automáticamente según los parámetros recibidos:
+
+      Modo B  (Lluvia libre) : sin imagen, sin descripción.
+              Rota ángulos temáticos y usa el historial del cliente internamente.
+      Modo C  (Tema/evento)  : sin imagen, con descripción.
+              Las 3 ideas giran alrededor del tema descrito por el usuario.
+      Modo A  (Foto)         : con imagen, sin descripción.
+              Ideas basadas en lo que aparece en la foto adjunta.
+      Modo A+ (Foto + tema)  : con imagen y descripción.
+              Ideas a partir de la foto, con el tema como eje central.
+
+    Argumentos:
+      brand_kit         (dict):      Ficha del cliente (Brand Kit).
+      nivel_creatividad (str):       "seguras", "equilibradas" o "atrevidas".
+      ruta_imagen       (str|None):  Ruta al archivo de imagen (JPG, PNG, GIF, WEBP).
+      descripcion       (str|None):  Tema o evento a tratar (texto libre del usuario).
+      ideas_previas     (list|None): Conceptos ya propuestos para evitar repeticiones.
+                                     El llamador gestiona esta lista para A, A+ y C.
+                                     En Modo B se ignora (el historial es interno).
+
+    Devuelve:
+      tuple[list, str|None]:
+        - list:     Lista de 3 diccionarios con los campos de cada idea.
+        - str|None: Ángulo temático usado (solo en Modo B; None en los demás modos).
+    """
+
+    # ── Validar nivel de creatividad ───────────────────────────────────────
+    if nivel_creatividad not in NIVELES_CREATIVIDAD:
+        print(f"  [aviso] Nivel '{nivel_creatividad}' no reconocido. Se usará 'equilibradas'.")
+        nivel_creatividad = "equilibradas"
+    temperatura = NIVELES_CREATIVIDAD[nivel_creatividad]
+
+    hay_imagen = ruta_imagen is not None
+
+    # ── Preparar imagen si la hay ──────────────────────────────────────────
+    # Se lee aquí una vez y se codifica en base64 para el mensaje multimodal.
+    datos_imagen = None   # tupla (datos_b64, media_type) o None
+    if hay_imagen:
+        if not os.path.exists(ruta_imagen):
+            raise FileNotFoundError(
+                f"No se encontró el archivo de imagen: '{ruta_imagen}'. "
+                "Comprueba que la ruta es correcta y que el archivo existe."
+            )
+        extension  = os.path.splitext(ruta_imagen)[1].lower()
+        media_type = _TIPOS_IMAGEN.get(extension)
+        if not media_type:
+            raise ValueError(
+                f"Formato de imagen no soportado: '{extension}'. "
+                f"Usa uno de: {', '.join(_TIPOS_IMAGEN.keys())}."
+            )
+        try:
+            with open(ruta_imagen, "rb") as f:
+                datos_b64 = base64.standard_b64encode(f.read()).decode("utf-8")
+        except OSError as e:
+            raise ValueError(f"No se pudo leer el archivo de imagen: {e}")
+        datos_imagen = (datos_b64, media_type)
+
+    # ── Modo B: historial y ángulo gestionados internamente ────────────────
+    # En los demás modos el llamador controla la anti-repetición vía ideas_previas.
+    historial_para_prompt = None
+    angulo_elegido        = None
+    nombre_cliente        = brand_kit["cliente"]
+
+    if not hay_imagen and not descripcion:
+        historial_para_prompt = cargar_historial(nombre_cliente)
+        angulo_elegido        = elegir_angulo(historial_para_prompt)
+
+    # ── Construir el texto del prompt ──────────────────────────────────────
+    texto_prompt = _construir_prompt_flexible(
+        brand_kit,
+        hay_imagen=hay_imagen,
+        descripcion=descripcion,
+        historial_conceptos=historial_para_prompt,
+        angulo=angulo_elegido,
+        ideas_previas=ideas_previas,
+    )
+
+    # ── Ensamblar el contenido del mensaje para la API ─────────────────────
+    # Con imagen → lista de bloques [imagen, texto] (multimodal).
+    # Sin imagen → string de texto directamente.
+    if datos_imagen is not None:
+        datos_b64, media_type = datos_imagen
+        contenido_api = [
+            {
+                "type": "image",
+                "source": {
+                    "type":       "base64",
+                    "media_type": media_type,
+                    "data":       datos_b64,
+                },
+            },
+            {"type": "text", "text": texto_prompt},
+        ]
+    else:
+        contenido_api = texto_prompt
+
+    # ── Llamar a la API y parsear la respuesta ────────────────────────────
+    # _parsear_lista_json aplica repair_json si json.loads falla a la primera.
+    texto_respuesta = _llamar_api(contenido_api, temperatura)
+    ideas = _parsear_lista_json(texto_respuesta)
+
+    # ── Guardar en historial (solo Modo B) ─────────────────────────────────
+    # Los modos A, C y A+ no tocan el historial del cliente: su anti-repetición
+    # es efímera (gestionada por el llamador vía ideas_previas).
+    if not hay_imagen and not descripcion:
+        guardar_en_historial(nombre_cliente, ideas)
+
+    return ideas, angulo_elegido
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -776,3 +1112,102 @@ if __name__ == "__main__":
 
         except (ValueError, ConnectionError, FileNotFoundError) as e:
             print(f"\n[ERROR Modo A] {e}")
+
+    # ── Prueba de los cuatro modos flexibles: PROBAR_FLEXIBLE = True ──────────
+    # Ejecuta Caso B, C, A y A+ en secuencia usando generar_ideas_flexible.
+    # Coloca foto_prueba.jpg en la carpeta del proyecto para los casos con imagen.
+    if PROBAR_FLEXIBLE:
+        ruta_foto_flex = "foto_prueba.jpg"
+
+        # Helper local para mostrar las ideas de un caso
+        def _mostrar_caso(titulo, ideas, hay_imagen_caso):
+            campo_visual = "tratamiento_imagen" if hay_imagen_caso else "tipo_contenido_sugerido"
+            etiq_visual  = "Tratamiento imagen" if hay_imagen_caso else "Tipo de contenido"
+            etiquetas_caso = {
+                "concepto":      "Concepto",
+                campo_visual:    etiq_visual,
+                "texto_en_pantalla":    "Texto en pantalla",
+                "elemento_interactivo": "Elemento interactivo",
+                "por_que_funciona":     "Por qué funciona",
+            }
+            print("\n" + "=" * 70)
+            print(f"  {titulo}")
+            print("=" * 70)
+            for idea in ideas:
+                print(f"\n>> IDEA {idea.get('idea', '?')}")
+                print("-" * 50)
+                for clave, etiqueta in etiquetas_caso.items():
+                    print(f"  {etiqueta}: {idea.get(clave, '—')}")
+            print()
+
+        # ── Caso B: sin foto, sin descripción ─────────────────────────────
+        print("\n" + "█" * 70)
+        print("  PRUEBA MODO FLEXIBLE — CASO B: lluvia libre")
+        print("█" * 70)
+        try:
+            ideas_b, angulo_b = generar_ideas_flexible(
+                ficha, nivel_creatividad="equilibradas"
+            )
+            _mostrar_caso(
+                f"CASO B — Sin foto, sin descripción (ángulo: {angulo_b})",
+                ideas_b, hay_imagen_caso=False
+            )
+        except (ValueError, ConnectionError, FileNotFoundError) as e:
+            print(f"\n[ERROR Caso B] {e}")
+
+        # ── Caso C: sin foto, con descripción ─────────────────────────────
+        print("█" * 70)
+        print("  PRUEBA MODO FLEXIBLE — CASO C: tema/evento")
+        print("█" * 70)
+        descripcion_c = "Anuncio del nuevo menú de Fallas que arranca el viernes 13 de marzo"
+        try:
+            ideas_c, _ = generar_ideas_flexible(
+                ficha,
+                nivel_creatividad="equilibradas",
+                descripcion=descripcion_c,
+            )
+            _mostrar_caso(
+                f"CASO C — Sin foto, descripción: «{descripcion_c}»",
+                ideas_c, hay_imagen_caso=False
+            )
+        except (ValueError, ConnectionError, FileNotFoundError) as e:
+            print(f"\n[ERROR Caso C] {e}")
+
+        # ── Caso A: con foto, sin descripción ─────────────────────────────
+        print("█" * 70)
+        print("  PRUEBA MODO FLEXIBLE — CASO A: foto sin descripción")
+        print("█" * 70)
+        try:
+            ideas_a, _ = generar_ideas_flexible(
+                ficha,
+                nivel_creatividad="equilibradas",
+                ruta_imagen=ruta_foto_flex,
+            )
+            _mostrar_caso(
+                f"CASO A — Foto: {ruta_foto_flex}, sin descripción",
+                ideas_a, hay_imagen_caso=True
+            )
+        except (ValueError, ConnectionError, FileNotFoundError) as e:
+            print(f"\n[ERROR Caso A] {e}")
+
+        # ── Caso A+: con foto + descripción ───────────────────────────────
+        print("█" * 70)
+        print("  PRUEBA MODO FLEXIBLE — CASO A+: foto + descripción")
+        print("█" * 70)
+        descripcion_aplus = "Promoción del aperitivo del sábado"
+        try:
+            ideas_aplus, _ = generar_ideas_flexible(
+                ficha,
+                nivel_creatividad="equilibradas",
+                ruta_imagen=ruta_foto_flex,
+                descripcion=descripcion_aplus,
+            )
+            _mostrar_caso(
+                f"CASO A+ — Foto: {ruta_foto_flex}, descripción: «{descripcion_aplus}»",
+                ideas_aplus, hay_imagen_caso=True
+            )
+        except (ValueError, ConnectionError, FileNotFoundError) as e:
+            print(f"\n[ERROR Caso A+] {e}")
+
+        print("█" * 70)
+        print("Listo (PROBAR_FLEXIBLE).")

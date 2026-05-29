@@ -1,16 +1,14 @@
 import glob
 import html
 import json
+import os
+import tempfile
 
 import streamlit as st
 
 from brand_kit import cargar_brand_kit
 from generador import (
-    cargar_historial,
-    construir_prompt,
-    elegir_angulo,
-    generar_ideas,
-    guardar_en_historial,
+    generar_ideas_flexible,
     refinar_idea,
 )
 
@@ -163,7 +161,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── Traducción etiqueta visible → valor interno de generar_ideas() ────────────
+# ── Traducción etiqueta visible → valor interno de generar_ideas_flexible() ───
 MAPA_CREATIVIDAD = {
     "Seguras y clásicas":     "seguras",
     "Equilibradas":           "equilibradas",
@@ -194,18 +192,25 @@ def descubrir_clientes():
 def renderizar_idea(idea, prefijo="IDEA"):
     """
     Renderiza una idea como tarjeta HTML.
-    Jerarquía visual: concepto (negrita) > texto en pantalla (destacado con acento)
-    > campos medios > por qué funciona (discreto).
+    Jerarquía visual: concepto > texto en pantalla (destacado) > campos medios > por qué funciona.
 
     Usamos html.escape() en todos los campos dinámicos para evitar que caracteres
     como < > & rompan el HTML si la IA los incluye en el texto.
     """
-    numero    = html.escape(str(idea.get("idea", "?")))
-    concepto  = html.escape(idea.get("concepto", "—"))
-    que_grabar = html.escape(idea.get("tipo_contenido_sugerido", "—"))
-    texto     = html.escape(idea.get("texto_en_pantalla", "—"))
-    elemento  = html.escape(idea.get("elemento_interactivo", "—"))
-    por_que   = html.escape(idea.get("por_que_funciona", "—"))
+    numero   = html.escape(str(idea.get("idea", "?")))
+    concepto = html.escape(idea.get("concepto", "—"))
+    texto    = html.escape(idea.get("texto_en_pantalla", "—"))
+    elemento = html.escape(idea.get("elemento_interactivo", "—"))
+    por_que  = html.escape(idea.get("por_que_funciona", "—"))
+
+    # Modos con imagen usan "tratamiento_imagen"; modos de texto usan "tipo_contenido_sugerido".
+    # Comprobamos qué campo trae la idea para mostrar la etiqueta correcta.
+    if "tratamiento_imagen" in idea:
+        etiqueta_formato = "Tratamiento de la imagen"
+        que_grabar = html.escape(idea.get("tratamiento_imagen", "—"))
+    else:
+        etiqueta_formato = "Qué grabar"
+        que_grabar = html.escape(idea.get("tipo_contenido_sugerido", "—"))
 
     st.markdown(f"""
     <div class="idea-card">
@@ -214,7 +219,7 @@ def renderizar_idea(idea, prefijo="IDEA"):
         <div class="idea-concepto">{concepto}</div>
         <div class="campo-label">Texto en pantalla</div>
         <div class="campo-texto-pantalla">{texto}</div>
-        <div class="campo-label">Qué grabar</div>
+        <div class="campo-label">{etiqueta_formato}</div>
         <div class="campo-valor">{que_grabar}</div>
         <div class="campo-label">Elemento interactivo</div>
         <div class="campo-valor">{elemento}</div>
@@ -230,11 +235,18 @@ def renderizar_idea_refinada(idea):
     para que el usuario distinga de un vistazo que es la versión revisada.
     Misma estructura de jerarquía que renderizar_idea().
     """
-    concepto   = html.escape(idea.get("concepto", "—"))
-    que_grabar = html.escape(idea.get("tipo_contenido_sugerido", "—"))
-    texto      = html.escape(idea.get("texto_en_pantalla", "—"))
-    elemento   = html.escape(idea.get("elemento_interactivo", "—"))
-    por_que    = html.escape(idea.get("por_que_funciona", "—"))
+    concepto = html.escape(idea.get("concepto", "—"))
+    texto    = html.escape(idea.get("texto_en_pantalla", "—"))
+    elemento = html.escape(idea.get("elemento_interactivo", "—"))
+    por_que  = html.escape(idea.get("por_que_funciona", "—"))
+
+    # Mismo criterio que en renderizar_idea: el campo presente determina la etiqueta.
+    if "tratamiento_imagen" in idea:
+        etiqueta_formato = "Tratamiento de la imagen"
+        que_grabar = html.escape(idea.get("tratamiento_imagen", "—"))
+    else:
+        etiqueta_formato = "Qué grabar"
+        que_grabar = html.escape(idea.get("tipo_contenido_sugerido", "—"))
 
     st.markdown(f"""
     <div class="refinada-card">
@@ -243,7 +255,7 @@ def renderizar_idea_refinada(idea):
         <div class="idea-concepto">{concepto}</div>
         <div class="campo-label">Texto en pantalla</div>
         <div class="campo-texto-pantalla">{texto}</div>
-        <div class="campo-label">Qué grabar</div>
+        <div class="campo-label">{etiqueta_formato}</div>
         <div class="campo-valor">{que_grabar}</div>
         <div class="campo-label">Elemento interactivo</div>
         <div class="campo-valor">{elemento}</div>
@@ -263,9 +275,17 @@ if "angulo_usado" not in st.session_state:
     st.session_state.angulo_usado = None
 if "ideas_refinadas" not in st.session_state:
     # Diccionario {índice_idea (0/1/2): dict con la última versión refinada}.
-    # Permite encadenar refinamientos: cada refine parte del resultado anterior,
-    # no de la idea original.
+    # Permite encadenar refinamientos: cada petición parte del resultado anterior.
     st.session_state.ideas_refinadas = {}
+
+# Clave de contexto y lista de ideas previas para la anti-repetición (Modos A, C, A+).
+# contexto_id = tupla (foto_part, desc_part) que identifica el contexto actual.
+# Si cambia entre pulsaciones, se reinicia ideas_previas_contexto.
+# En Modo B (ambos None) no se usa: el historial lo gestiona generar_ideas_flexible.
+if "contexto_id" not in st.session_state:
+    st.session_state.contexto_id = None
+if "ideas_previas_contexto" not in st.session_state:
+    st.session_state.ideas_previas_contexto = []
 
 
 # ── Sidebar: controles de configuración y botón principal ────────────────────
@@ -300,11 +320,83 @@ with st.sidebar:
     )
     nivel_interno = MAPA_CREATIVIDAD[nivel_etiqueta]
 
+    st.markdown("&nbsp;", unsafe_allow_html=True)
+
+    # ── Subidor de foto (Modos A y A+) ────────────────────────────────────
+    foto_subida = st.file_uploader(
+        "¿Tienes una foto? Súbela aquí (opcional)",
+        type=["jpg", "jpeg", "png"],
+        help=(
+            "Sube una foto del local, un plato o cualquier imagen del cliente "
+            "para recibir ideas de Story basadas en lo que aparece en ella."
+        ),
+    )
+
+    # ── Campo de descripción (Modos C y A+) ───────────────────────────────
+    # Si se rellena, las ideas girarán alrededor del tema descrito.
+    # Si se combina con foto, se activa el Modo A+.
+    descripcion = st.text_area(
+        "¿Tienes algo en mente? Descríbelo (opcional)",
+        placeholder=(
+            "Ej: anuncio del menú de Fallas del viernes, "
+            "promoción del aperitivo del sábado, presentación del nuevo chef..."
+        ),
+        height=100,
+    )
+
+    # Normalizar la descripción: eliminamos espacios y tratamos el string vacío como None
+    desc_strip = descripcion.strip() if descripcion else ""
+    hay_foto   = foto_subida is not None
+    hay_desc   = bool(desc_strip)
+
+    # ── Detección de cambio de contexto ───────────────────────────────────
+    # La clave de contexto combina la identidad de la foto (nombre, tamaño) y
+    # el texto de la descripción. Cuando cualquiera de los dos cambia, reseteamos
+    # las ideas previas acumuladas para que la anti-repetición empiece de cero.
+    if hay_foto or hay_desc:
+        foto_part         = (foto_subida.name, foto_subida.size) if hay_foto else None
+        desc_part         = desc_strip if hay_desc else None
+        contexto_id_actual = (foto_part, desc_part)
+    else:
+        # Modo B puro: la anti-repetición la gestiona generar_ideas_flexible internamente
+        contexto_id_actual = None
+
+    if contexto_id_actual != st.session_state.contexto_id:
+        st.session_state.contexto_id            = contexto_id_actual
+        st.session_state.ideas_previas_contexto = []
+
+    # ── Indicador de modo activo ───────────────────────────────────────────
+    # Caption discreto para que el usuario sepa qué modo se activará al pulsar.
+    if hay_foto and hay_desc:
+        st.caption("Modo: ideas para tu foto sobre el tema descrito")
+    elif hay_foto:
+        st.caption("Modo: ideas para tu foto")
+    elif hay_desc:
+        st.caption("Modo: ideas sobre el tema descrito")
+    else:
+        st.caption("Modo: ideas a partir del cliente")
+
     st.divider()
+
+    # ── Etiqueta dinámica del botón ────────────────────────────────────────
+    # "Generar otras 3 ideas" cuando ya hay ideas acumuladas para el contexto actual.
+    # Cada combinación de foto/descripción tiene su propia etiqueta de primera vez.
+    tiene_previas = bool(st.session_state.ideas_previas_contexto)
+
+    if tiene_previas and (hay_foto or hay_desc):
+        etiqueta_boton = "Generar otras 3 ideas"
+    elif hay_foto and hay_desc:
+        etiqueta_boton = "Generar ideas para esta foto y tema"
+    elif hay_foto:
+        etiqueta_boton = "Generar ideas para esta foto"
+    elif hay_desc:
+        etiqueta_boton = "Generar ideas sobre este tema"
+    else:
+        etiqueta_boton = "Generar ideas"
 
     # Botón principal: type="primary" aplica el color de acento de Streamlit
     generar_pulsado = st.button(
-        "Generar ideas",
+        etiqueta_boton,
         use_container_width=True,
         type="primary",
     )
@@ -322,22 +414,62 @@ st.markdown(f"""
 # ── Lógica de generación ──────────────────────────────────────────────────────
 if generar_pulsado:
     try:
-        with st.spinner(f"Generando ideas para {nombre_seleccionado}..."):
-            ficha     = cargar_brand_kit(ruta_seleccionada)
-            historial = cargar_historial(nombre_seleccionado)
-            angulo    = elegir_angulo(historial)
-            prompt    = construir_prompt(ficha, historial_conceptos=historial, angulo=angulo)
-            ideas     = generar_ideas(prompt, nivel_creatividad=nivel_interno)
-            guardar_en_historial(nombre_seleccionado, ideas)
+        ficha = cargar_brand_kit(ruta_seleccionada)
 
-        # Guardamos en session_state para que sobrevivan a los reruns de Streamlit.
-        # Al generar ideas nuevas, reseteamos las versiones refinadas: las de la
-        # tanda anterior no tienen sentido sobre ideas completamente distintas.
+        # Mensaje del spinner adaptado al modo activo
+        if hay_foto and hay_desc:
+            msg_spinner = f"Analizando la foto y el tema para {nombre_seleccionado}..."
+        elif hay_foto:
+            msg_spinner = f"Analizando la foto y generando ideas para {nombre_seleccionado}..."
+        elif hay_desc:
+            msg_spinner = f"Generando ideas sobre el tema para {nombre_seleccionado}..."
+        else:
+            msg_spinner = f"Generando ideas para {nombre_seleccionado}..."
+
+        with st.spinner(msg_spinner):
+            # generar_ideas_flexible espera una ruta de archivo, no bytes en memoria.
+            # Si hay foto, la escribimos en un temporal, lo usamos y lo borramos.
+            ruta_tmp = None
+            if hay_foto:
+                ext = os.path.splitext(foto_subida.name)[1].lower()
+                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                    tmp.write(foto_subida.getvalue())
+                    ruta_tmp = tmp.name
+
+            try:
+                ideas, angulo = generar_ideas_flexible(
+                    ficha,
+                    nivel_interno,
+                    ruta_imagen=ruta_tmp,
+                    descripcion=desc_strip or None,
+                    # En Modo B el historial es interno; en el resto usamos las previas
+                    ideas_previas=st.session_state.ideas_previas_contexto or None,
+                )
+            finally:
+                # Borrar el temporal en cualquier caso (éxito o error)
+                if ruta_tmp is not None:
+                    try:
+                        os.unlink(ruta_tmp)
+                    except OSError:
+                        pass
+
+        # Acumular los nuevos conceptos para la anti-repetición (Modos A, C y A+).
+        # En Modo B no acumulamos aquí: generar_ideas_flexible ya guardó en historial.
+        if hay_foto or hay_desc:
+            nuevos = [i.get("concepto", "") for i in ideas if i.get("concepto")]
+            st.session_state.ideas_previas_contexto = (
+                st.session_state.ideas_previas_contexto + nuevos
+            )
+
+        # Guardar resultado y ángulo; limpiar refinamientos de la tanda anterior
         st.session_state.ideas           = ideas
-        st.session_state.angulo_usado    = angulo
+        st.session_state.angulo_usado    = angulo   # None en todos los modos salvo B
         st.session_state.ideas_refinadas = {}
 
-    except (ValueError, ConnectionError) as e:
+        # Forzar rerun para que el botón se redibuje con el texto correcto al instante
+        st.rerun()
+
+    except (ValueError, ConnectionError, FileNotFoundError) as e:
         st.error(f"No se han podido generar las ideas. Detalle del error:\n\n{e}")
 
 
@@ -348,15 +480,17 @@ if not st.session_state.ideas:
     <div class="bienvenida">
         <div class="bienvenida-titulo">Listo para empezar</div>
         <div class="bienvenida-desc">
-            Elige un cliente y un nivel de creatividad en el panel izquierdo
-            y pulsa <strong>Generar ideas</strong> para comenzar.
+            Elige un cliente en el panel izquierdo y pulsa el botón para comenzar.
+            Puedes subir una foto, escribir un tema, o combinar ambas cosas.
         </div>
     </div>
     """, unsafe_allow_html=True)
 
 else:
-    # Ángulo temático, como contexto discreto encima de las tarjetas
-    st.caption(f"Angulo tematico: {st.session_state.angulo_usado}")
+    # Ángulo temático: solo se muestra en Modo B (generar_ideas_flexible devuelve
+    # el ángulo únicamente cuando no hay imagen ni descripción).
+    if st.session_state.angulo_usado:
+        st.caption(f"Ángulo temático: {st.session_state.angulo_usado}")
 
     # Las 3 ideas en columnas de igual ancho (aprovecha el layout wide)
     columnas = st.columns(3, gap="medium")
@@ -364,7 +498,7 @@ else:
         with col:
             renderizar_idea(idea)
 
-    # ── Sección de refinamiento ───────────────────────────────────────────────
+    # ── Sección de refinamiento ───────────────────────────────────────────
     st.divider()
     st.markdown("#### Refinar una idea")
 
