@@ -3,6 +3,7 @@ import sys
 import json
 import re
 import unicodedata
+import base64
 
 import anthropic
 from dotenv import load_dotenv
@@ -237,13 +238,16 @@ El JSON debe ser una lista de 3 objetos con exactamente esta estructura:
 
 def _llamar_api(prompt, temperatura):
     """
-    Función auxiliar privada: envía un prompt a la API de Anthropic y devuelve
+    Función auxiliar privada: envía un mensaje a la API de Anthropic y devuelve
     el texto crudo de la respuesta. Centraliza la autenticación y el manejo de
-    errores para que generar_ideas y refinar_idea no dupliquen ese código.
+    errores para que todas las funciones de generación compartan este código.
 
     Argumentos:
-      prompt      (str):   El texto del prompt a enviar.
-      temperatura (float): Valor entre 0.0 y 1.0 que controla la creatividad.
+      prompt      (str | list): Texto del prompt (modo texto) O lista de bloques
+                                de contenido [{type, ...}] (modo multimodal con imagen).
+                                El SDK de Anthropic acepta ambas formas en el campo
+                                "content" del mensaje.
+      temperatura (float):      Valor entre 0.0 y 1.0 que controla la creatividad.
 
     Devuelve:
       str: Texto completo de la respuesta de la IA.
@@ -455,6 +459,205 @@ def refinar_idea(idea, peticion_cambio, nivel_creatividad="equilibradas"):
     return idea_revisada
 
 
+# ── Constante de prueba del Modo A ────────────────────────────────────────────
+# Cambia a True para activar el bloque de prueba de foto al ejecutar el script.
+PROBAR_FOTO = False
+
+
+# Extensiones de imagen soportadas por la API de visión de Anthropic
+_TIPOS_IMAGEN = {
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png":  "image/png",
+    ".gif":  "image/gif",
+    ".webp": "image/webp",
+}
+
+
+def construir_prompt_foto(brand_kit, ideas_previas=None):
+    """
+    Devuelve el texto del prompt para pedir a la IA que analice una imagen adjunta
+    y proponga 3 ideas de Story basadas en lo que ve en esa foto concreta.
+
+    Argumentos:
+      brand_kit     (dict):      Ficha del cliente.
+      ideas_previas (list[str]): Conceptos ya propuestos para esta misma foto
+                                 (para pedir enfoques distintos en sucesivas llamadas).
+
+    Devuelve:
+      str: Texto del prompt (sin la imagen; la imagen va en el bloque aparte del mensaje).
+    """
+
+    # ── Campos de la ficha ─────────────────────────────────────────────────
+    cliente = brand_kit["cliente"]
+    sector  = brand_kit["sector"]
+    tono    = brand_kit["tono"]
+    publico = brand_kit["publico"]
+    valores = brand_kit.get("valores", [])
+    evitar  = brand_kit.get("evitar", [])
+
+    # ── Bloques opcionales de identidad de marca ───────────────────────────
+    bloque_valores = ""
+    if valores:
+        items = "\n".join(f"  - {v}" for v in valores)
+        bloque_valores = f"\nValores de marca:\n{items}"
+
+    bloque_evitar = ""
+    if evitar:
+        items = "\n".join(f"  - {e}" for e in evitar)
+        bloque_evitar = f"\nCosas a evitar:\n{items}"
+
+    # ── Bloque anti-repetición: ideas ya propuestas para esta foto ─────────
+    bloque_previas = ""
+    if ideas_previas:
+        items = "\n".join(f"  - {i}" for i in ideas_previas)
+        bloque_previas = (
+            f"\nIDEAS YA PROPUESTAS PARA ESTA FOTO (NO repitas ninguna ni propongas "
+            f"ideas muy parecidas; busca enfoques claramente distintos):\n{items}"
+        )
+
+    # ── Ensamblado del prompt ──────────────────────────────────────────────
+    prompt = f"""Eres una experta en crear Stories de Instagram para marcas y negocios.
+
+Trabaja para el siguiente cliente:
+
+Cliente: {cliente}
+Sector: {sector}
+Tono de comunicación: {tono}
+Público objetivo: {publico}{bloque_valores}{bloque_evitar}
+
+Se te adjunta una imagen relacionada con este cliente. Obsérvala con atención.
+Tu tarea es proponer exactamente 3 ideas de Story de Instagram para convertir ESA imagen
+concreta en Stories para {cliente}. El campo "tipo_contenido_sugerido" debe describir
+cómo encuadrar o usar lo que se ve en la foto (no el tipo de formato genérico, sino
+qué mostrar y cómo trabajarlo visualmente).{bloque_previas}
+
+INSTRUCCIONES DE FORMATO:
+Responde ÚNICAMENTE con un JSON válido, sin ningún texto adicional antes ni después.
+El JSON debe ser una lista de 3 objetos con exactamente esta estructura:
+
+[
+  {{
+    "idea": 1,
+    "concepto": "Descripción breve de la idea central de la Story",
+    "tipo_contenido_sugerido": "Cómo encuadrar o trabajar visualmente lo que aparece en la foto",
+    "texto_en_pantalla": "El copy exacto que aparecería escrito en la Story",
+    "elemento_interactivo": "Encuesta / Pregunta / Cuenta atrás / Ninguno / etc.",
+    "por_que_funciona": "Explicación breve de por qué esta idea conecta con el público"
+  }},
+  {{
+    "idea": 2,
+    "concepto": "...",
+    "tipo_contenido_sugerido": "...",
+    "texto_en_pantalla": "...",
+    "elemento_interactivo": "...",
+    "por_que_funciona": "..."
+  }},
+  {{
+    "idea": 3,
+    "concepto": "...",
+    "tipo_contenido_sugerido": "...",
+    "texto_en_pantalla": "...",
+    "elemento_interactivo": "...",
+    "por_que_funciona": "..."
+  }}
+]"""
+
+    return prompt
+
+
+def generar_ideas_desde_foto(ruta_imagen, brand_kit, nivel_creatividad="equilibradas",
+                              ideas_previas=None):
+    """
+    Lee una imagen, la codifica en base64 y llama a la API de Anthropic con un
+    mensaje multimodal (imagen + prompt) para obtener 3 ideas de Story basadas
+    en esa foto concreta.
+
+    Argumentos:
+      ruta_imagen       (str):       Ruta al archivo de imagen (JPG, PNG, GIF o WEBP).
+      brand_kit         (dict):      Ficha del cliente.
+      nivel_creatividad (str):       "seguras", "equilibradas" o "atrevidas".
+      ideas_previas     (list[str]): Conceptos ya propuestos para esta foto (opcional).
+
+    Devuelve:
+      list: Lista de 3 diccionarios con los campos de cada idea de Story.
+    """
+
+    # ── Verificar que el archivo existe ────────────────────────────────────
+    if not os.path.exists(ruta_imagen):
+        raise FileNotFoundError(
+            f"No se encontró el archivo de imagen: '{ruta_imagen}'. "
+            "Comprueba que la ruta es correcta y que el archivo existe."
+        )
+
+    # ── Detectar el tipo de imagen por extensión ───────────────────────────
+    extension  = os.path.splitext(ruta_imagen)[1].lower()
+    media_type = _TIPOS_IMAGEN.get(extension)
+    if not media_type:
+        raise ValueError(
+            f"Formato de imagen no soportado: '{extension}'. "
+            f"Usa uno de: {', '.join(_TIPOS_IMAGEN.keys())}."
+        )
+
+    # ── Leer el archivo y codificarlo en base64 ────────────────────────────
+    try:
+        with open(ruta_imagen, "rb") as f:
+            datos_b64 = base64.standard_b64encode(f.read()).decode("utf-8")
+    except OSError as e:
+        raise ValueError(f"No se pudo leer el archivo de imagen: {e}")
+
+    # ── Obtener la temperatura según el nivel elegido ──────────────────────
+    if nivel_creatividad not in NIVELES_CREATIVIDAD:
+        print(f"  [aviso] Nivel '{nivel_creatividad}' no reconocido. Se usará 'equilibradas'.")
+        nivel_creatividad = "equilibradas"
+
+    temperatura = NIVELES_CREATIVIDAD[nivel_creatividad]
+
+    # ── Construir el mensaje multimodal: bloque imagen + bloque texto ──────
+    # El SDK de Anthropic acepta "content" como lista de bloques cuando el
+    # mensaje incluye más de un tipo de contenido (imagen y texto).
+    contenido_mensaje = [
+        {
+            "type": "image",
+            "source": {
+                "type":       "base64",
+                "media_type": media_type,
+                "data":       datos_b64,
+            },
+        },
+        {
+            "type": "text",
+            "text": construir_prompt_foto(brand_kit, ideas_previas=ideas_previas),
+        },
+    ]
+
+    # ── Llamar a la API reutilizando el helper compartido ──────────────────
+    # _llamar_api acepta tanto un string como una lista de bloques de contenido.
+    texto_respuesta = _llamar_api(contenido_mensaje, temperatura)
+
+    # ── Extraer y parsear el JSON de la respuesta ──────────────────────────
+    inicio = texto_respuesta.find("[")
+    fin    = texto_respuesta.rfind("]")
+
+    if inicio == -1 or fin == -1:
+        raise ValueError(
+            "La respuesta de la IA no contiene un JSON válido. "
+            f"Respuesta recibida:\n{texto_respuesta}"
+        )
+
+    fragmento_json = texto_respuesta[inicio: fin + 1]
+
+    try:
+        ideas = json.loads(fragmento_json)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"La respuesta de la IA contiene JSON mal formado y no se pudo parsear. "
+            f"Detalle: {e}\nFragmento recibido:\n{fragmento_json}"
+        )
+
+    return ideas
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Bloque de prueba: carga la ficha, construye el prompt, llama a la IA
 # y muestra las 3 ideas de forma legible.
@@ -536,3 +739,40 @@ if __name__ == "__main__":
 
     except (ValueError, ConnectionError) as e:
         print(f"\n[ERROR] {e}")
+
+    # ── Prueba del Modo A: establecer PROBAR_FOTO = True para ejecutarlo ──────
+    # Coloca en la misma carpeta que este script un archivo llamado foto_prueba.jpg
+    # (o el nombre que prefieras) y ajusta la variable ruta_foto si es necesario.
+    if PROBAR_FOTO:
+        ruta_foto = "foto_prueba.jpg"
+
+        print("\n" + "=" * 70)
+        print("  MODO A — GENERACIÓN DESDE FOTO")
+        print("=" * 70)
+        print(f"  Imagen: {ruta_foto}\n")
+
+        try:
+            ideas_foto = generar_ideas_desde_foto(
+                ruta_foto, ficha, nivel_creatividad="equilibradas"
+            )
+
+            etiquetas_foto = {
+                "concepto":                "Concepto",
+                "tipo_contenido_sugerido": "Tipo de contenido",
+                "texto_en_pantalla":       "Texto en pantalla",
+                "elemento_interactivo":    "Elemento interactivo",
+                "por_que_funciona":        "Por qué funciona",
+            }
+
+            for idea in ideas_foto:
+                print(f"\n>> IDEA {idea.get('idea', '?')}")
+                print("-" * 50)
+                for clave, etiqueta in etiquetas_foto.items():
+                    valor = idea.get(clave, "—")
+                    print(f"  {etiqueta}: {valor}")
+
+            print("\n" + "=" * 70)
+            print("Listo (Modo A).")
+
+        except (ValueError, ConnectionError, FileNotFoundError) as e:
+            print(f"\n[ERROR Modo A] {e}")
