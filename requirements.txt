@@ -2,3 +2,4 @@ anthropic>=0.104.1
 streamlit>=1.57.0
 python-dotenv>=1.2.2
 json-repair>=0.59.10
+Pillow>=10.0.0

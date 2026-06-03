@@ -279,16 +279,19 @@ if "ideas_refinadas" not in st.session_state:
     st.session_state.ideas_refinadas = {}
 
 # Clave de contexto y lista de ideas previas para la anti-repetición (Modos A, C, A+).
-# contexto_id = tupla (foto_part, desc_part) que identifica el contexto actual.
-# Si cambia entre pulsaciones, se reinicia ideas_previas_contexto.
-# En Modo B (ambos None) no se usa: el historial lo gestiona generar_ideas_flexible.
+# contexto_id = tupla (modo, foto_part, desc_part) que identifica el contexto actual.
+# Ahora incluye el modo (pestaña activa) para que cambiar de pestaña reinicie el contexto.
+# En Modo B (contexto_id = None) no se usa: el historial lo gestiona generar_ideas_flexible.
 if "contexto_id" not in st.session_state:
     st.session_state.contexto_id = None
 if "ideas_previas_contexto" not in st.session_state:
     st.session_state.ideas_previas_contexto = []
 
 
-# ── Sidebar: controles de configuración y botón principal ────────────────────
+# ── Sidebar: solo controles que aplican a todos los modos ────────────────────
+# El selector de cliente y el nivel de creatividad son independientes del modo,
+# por eso permanecen aquí. La foto, la descripción y el botón de generar se han
+# movido a cada pestaña para que el modo sea una elección explícita del usuario.
 with st.sidebar:
     st.markdown(f"### {APP_NOMBRE}")
     st.caption(APP_SUBTITULO)
@@ -320,87 +323,6 @@ with st.sidebar:
     )
     nivel_interno = MAPA_CREATIVIDAD[nivel_etiqueta]
 
-    st.markdown("&nbsp;", unsafe_allow_html=True)
-
-    # ── Subidor de foto (Modos A y A+) ────────────────────────────────────
-    foto_subida = st.file_uploader(
-        "¿Tienes una foto? Súbela aquí (opcional)",
-        type=["jpg", "jpeg", "png"],
-        help=(
-            "Sube una foto del local, un plato o cualquier imagen del cliente "
-            "para recibir ideas de Story basadas en lo que aparece en ella."
-        ),
-    )
-
-    # ── Campo de descripción (Modos C y A+) ───────────────────────────────
-    # Si se rellena, las ideas girarán alrededor del tema descrito.
-    # Si se combina con foto, se activa el Modo A+.
-    descripcion = st.text_area(
-        "¿Tienes algo en mente? Descríbelo (opcional)",
-        placeholder=(
-            "Ej: anuncio del menú de Fallas del viernes, "
-            "promoción del aperitivo del sábado, presentación del nuevo chef..."
-        ),
-        height=100,
-    )
-
-    # Normalizar la descripción: eliminamos espacios y tratamos el string vacío como None
-    desc_strip = descripcion.strip() if descripcion else ""
-    hay_foto   = foto_subida is not None
-    hay_desc   = bool(desc_strip)
-
-    # ── Detección de cambio de contexto ───────────────────────────────────
-    # La clave de contexto combina la identidad de la foto (nombre, tamaño) y
-    # el texto de la descripción. Cuando cualquiera de los dos cambia, reseteamos
-    # las ideas previas acumuladas para que la anti-repetición empiece de cero.
-    if hay_foto or hay_desc:
-        foto_part         = (foto_subida.name, foto_subida.size) if hay_foto else None
-        desc_part         = desc_strip if hay_desc else None
-        contexto_id_actual = (foto_part, desc_part)
-    else:
-        # Modo B puro: la anti-repetición la gestiona generar_ideas_flexible internamente
-        contexto_id_actual = None
-
-    if contexto_id_actual != st.session_state.contexto_id:
-        st.session_state.contexto_id            = contexto_id_actual
-        st.session_state.ideas_previas_contexto = []
-
-    # ── Indicador de modo activo ───────────────────────────────────────────
-    # Caption discreto para que el usuario sepa qué modo se activará al pulsar.
-    if hay_foto and hay_desc:
-        st.caption("Modo: ideas para tu foto sobre el tema descrito")
-    elif hay_foto:
-        st.caption("Modo: ideas para tu foto")
-    elif hay_desc:
-        st.caption("Modo: ideas sobre el tema descrito")
-    else:
-        st.caption("Modo: ideas a partir del cliente")
-
-    st.divider()
-
-    # ── Etiqueta dinámica del botón ────────────────────────────────────────
-    # "Generar otras 3 ideas" cuando ya hay ideas acumuladas para el contexto actual.
-    # Cada combinación de foto/descripción tiene su propia etiqueta de primera vez.
-    tiene_previas = bool(st.session_state.ideas_previas_contexto)
-
-    if tiene_previas and (hay_foto or hay_desc):
-        etiqueta_boton = "Generar otras 3 ideas"
-    elif hay_foto and hay_desc:
-        etiqueta_boton = "Generar ideas para esta foto y tema"
-    elif hay_foto:
-        etiqueta_boton = "Generar ideas para esta foto"
-    elif hay_desc:
-        etiqueta_boton = "Generar ideas sobre este tema"
-    else:
-        etiqueta_boton = "Generar ideas"
-
-    # Botón principal: type="primary" aplica el color de acento de Streamlit
-    generar_pulsado = st.button(
-        etiqueta_boton,
-        use_container_width=True,
-        type="primary",
-    )
-
 
 # ── Cabecera del área principal ───────────────────────────────────────────────
 st.markdown(f"""
@@ -411,17 +333,186 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 
+# ── Pestañas de selección de modo ────────────────────────────────────────────
+# Cada pestaña corresponde a un modo de generación. El usuario elige explícitamente
+# cómo quiere trabajar antes de aportar inputs, en lugar de que la app lo deduzca.
+tab_lluvia, tab_foto, tab_tema, tab_foto_tema = st.tabs([
+    "Lluvia de ideas",   # Modo B: sin foto, sin descripción
+    "Desde una foto",    # Modo A: con foto, sin descripción
+    "Desde un tema",     # Modo C: sin foto, con descripción
+    "Foto + tema",       # Modo A+: con foto y descripción
+])
+
+# Variables de control que se rellenan dentro de la pestaña cuyo botón se pulsa.
+# Solo una pestaña puede tener generar_pulsado=True en cada ejecución del script.
+generar_pulsado = False
+modo_activo     = None   # "B" | "A" | "C" | "A+"
+foto_activa     = None   # UploadedFile o None
+desc_activa     = ""     # str (ya sin espacios) o ""
+
+
+# ── Pestaña 1: Lluvia de ideas (Modo B) ──────────────────────────────────────
+with tab_lluvia:
+    st.markdown(
+        "Te damos 3 ideas variadas a partir de la identidad del cliente, "
+        "rotando temas para que no se repitan entre generaciones."
+    )
+    # En Modo B la anti-repetición la gestiona generar_ideas_flexible internamente,
+    # por eso el botón siempre muestra la misma etiqueta (no hay ideas_previas_contexto).
+    if st.button(
+        "Generar ideas",
+        key="btn_lluvia",
+        type="primary",
+        use_container_width=True,
+    ):
+        generar_pulsado = True
+        modo_activo     = "B"
+
+
+# ── Pestaña 2: Desde una foto (Modo A) ───────────────────────────────────────
+with tab_foto:
+    foto_a = st.file_uploader(
+        "Sube una foto del local, un plato o cualquier imagen del cliente",
+        type=["jpg", "jpeg", "png"],
+        key="foto_modo_a",
+        help=(
+            "La IA analizará la imagen y propondrá ideas de Story "
+            "basadas en lo que aparece en ella."
+        ),
+    )
+    # Calcular si ya existen ideas previas para este contexto concreto.
+    # El contexto_id incluye el modo y la identidad de la foto (nombre, tamaño).
+    ctx_a     = ("A", (foto_a.name, foto_a.size) if foto_a else None, None)
+    previas_a = (
+        ctx_a == st.session_state.contexto_id
+        and bool(st.session_state.ideas_previas_contexto)
+    )
+    label_a = "Generar otras 3 ideas" if previas_a else "Generar ideas para esta foto"
+    if st.button(
+        label_a,
+        key="btn_modo_a",
+        type="primary",
+        use_container_width=True,
+    ):
+        generar_pulsado = True
+        modo_activo     = "A"
+        foto_activa     = foto_a
+
+
+# ── Pestaña 3: Desde un tema (Modo C) ────────────────────────────────────────
+with tab_tema:
+    desc_c = st.text_area(
+        "Describe el tema o la ocasión",
+        placeholder=(
+            "Ej: anuncio del menú de Fallas del viernes, "
+            "promoción del aperitivo del sábado, presentación del nuevo chef..."
+        ),
+        height=100,
+        key="desc_modo_c",
+    )
+    desc_c_strip = desc_c.strip() if desc_c else ""
+    # El contexto_id incluye el modo y el texto de la descripción.
+    ctx_c     = ("C", None, desc_c_strip or None)
+    previas_c = (
+        ctx_c == st.session_state.contexto_id
+        and bool(st.session_state.ideas_previas_contexto)
+    )
+    label_c = "Generar otras 3 ideas" if previas_c else "Generar ideas sobre este tema"
+    if st.button(
+        label_c,
+        key="btn_modo_c",
+        type="primary",
+        use_container_width=True,
+    ):
+        generar_pulsado = True
+        modo_activo     = "C"
+        desc_activa     = desc_c_strip
+
+
+# ── Pestaña 4: Foto + tema (Modo A+) ─────────────────────────────────────────
+with tab_foto_tema:
+    foto_ap = st.file_uploader(
+        "Sube una foto del local, un plato o cualquier imagen del cliente",
+        type=["jpg", "jpeg", "png"],
+        key="foto_modo_ap",
+        help=(
+            "La IA analizará la imagen y aplicará el tema que describas "
+            "para proponer ideas de Story más ajustadas."
+        ),
+    )
+    desc_ap = st.text_area(
+        "Describe el tema o la ocasión",
+        placeholder=(
+            "Ej: anuncio del menú de Fallas del viernes, "
+            "promoción del aperitivo del sábado, presentación del nuevo chef..."
+        ),
+        height=100,
+        key="desc_modo_ap",
+    )
+    desc_ap_strip = desc_ap.strip() if desc_ap else ""
+    # El contexto_id incluye el modo, la identidad de la foto y el texto del tema.
+    ctx_ap    = (
+        "A+",
+        (foto_ap.name, foto_ap.size) if foto_ap else None,
+        desc_ap_strip or None,
+    )
+    previas_ap = (
+        ctx_ap == st.session_state.contexto_id
+        and bool(st.session_state.ideas_previas_contexto)
+    )
+    label_ap = "Generar otras 3 ideas" if previas_ap else "Generar ideas para esta foto y tema"
+    if st.button(
+        label_ap,
+        key="btn_modo_ap",
+        type="primary",
+        use_container_width=True,
+    ):
+        generar_pulsado = True
+        modo_activo     = "A+"
+        foto_activa     = foto_ap
+        desc_activa     = desc_ap_strip
+
+
 # ── Lógica de generación ──────────────────────────────────────────────────────
 if generar_pulsado:
+    # Calcular el nuevo contexto_id en función de la pestaña activa y sus inputs.
+    # El modo forma parte de la clave para que cambiar de pestaña reinicie el contexto
+    # aunque la foto o la descripción coincidan con una sesión anterior.
+    if modo_activo == "B":
+        nuevo_ctx = None
+    elif modo_activo == "A":
+        nuevo_ctx = (
+            "A",
+            (foto_activa.name, foto_activa.size) if foto_activa else None,
+            None,
+        )
+    elif modo_activo == "C":
+        nuevo_ctx = ("C", None, desc_activa or None)
+    else:  # A+
+        nuevo_ctx = (
+            "A+",
+            (foto_activa.name, foto_activa.size) if foto_activa else None,
+            desc_activa or None,
+        )
+
+    # Resetear las ideas previas si el contexto ha cambiado respecto a la última generación.
+    # Esto ocurre al cambiar de pestaña, subir una foto distinta o escribir un tema diferente.
+    if nuevo_ctx != st.session_state.contexto_id:
+        st.session_state.contexto_id            = nuevo_ctx
+        st.session_state.ideas_previas_contexto = []
+
+    hay_foto = foto_activa is not None
+    hay_desc = bool(desc_activa)
+
     try:
         ficha = cargar_brand_kit(ruta_seleccionada)
 
         # Mensaje del spinner adaptado al modo activo
-        if hay_foto and hay_desc:
+        if modo_activo == "A+":
             msg_spinner = f"Analizando la foto y el tema para {nombre_seleccionado}..."
-        elif hay_foto:
+        elif modo_activo == "A":
             msg_spinner = f"Analizando la foto y generando ideas para {nombre_seleccionado}..."
-        elif hay_desc:
+        elif modo_activo == "C":
             msg_spinner = f"Generando ideas sobre el tema para {nombre_seleccionado}..."
         else:
             msg_spinner = f"Generando ideas para {nombre_seleccionado}..."
@@ -431,9 +522,9 @@ if generar_pulsado:
             # Si hay foto, la escribimos en un temporal, lo usamos y lo borramos.
             ruta_tmp = None
             if hay_foto:
-                ext = os.path.splitext(foto_subida.name)[1].lower()
+                ext = os.path.splitext(foto_activa.name)[1].lower()
                 with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-                    tmp.write(foto_subida.getvalue())
+                    tmp.write(foto_activa.getvalue())
                     ruta_tmp = tmp.name
 
             try:
@@ -441,7 +532,7 @@ if generar_pulsado:
                     ficha,
                     nivel_interno,
                     ruta_imagen=ruta_tmp,
-                    descripcion=desc_strip or None,
+                    descripcion=desc_activa or None,
                     # En Modo B el historial es interno; en el resto usamos las previas
                     ideas_previas=st.session_state.ideas_previas_contexto or None,
                 )
@@ -473,15 +564,16 @@ if generar_pulsado:
         st.error(f"No se han podido generar las ideas. Detalle del error:\n\n{e}")
 
 
-# ── Área principal: bienvenida o ideas ───────────────────────────────────────
+# ── Área de resultados: bienvenida o ideas ───────────────────────────────────
 if not st.session_state.ideas:
-    # Estado inicial: se muestra hasta que el usuario genera ideas por primera vez.
+    # Pantalla de bienvenida: visible hasta que el usuario genera ideas por primera vez.
+    # Invita a elegir una pestaña en lugar de describir controles de la sidebar.
     st.markdown("""
     <div class="bienvenida">
-        <div class="bienvenida-titulo">Listo para empezar</div>
+        <div class="bienvenida-titulo">Elige cómo quieres empezar</div>
         <div class="bienvenida-desc">
-            Elige un cliente en el panel izquierdo y pulsa el botón para comenzar.
-            Puedes subir una foto, escribir un tema, o combinar ambas cosas.
+            Selecciona una pestaña según lo que tengas: una foto, un tema,
+            ambas cosas, o deja que el generador sorprenda con ideas variadas.
         </div>
     </div>
     """, unsafe_allow_html=True)

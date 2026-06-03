@@ -512,6 +512,82 @@ _TIPOS_IMAGEN = {
     ".webp": "image/webp",
 }
 
+# Ancho máximo en píxeles que se envía a la API.
+# Imágenes más anchas se reducen proporcionalmente antes de codificarlas.
+# El valor de 1568 px es el límite recomendado por Anthropic para visión.
+_ANCHO_MAX_IMAGEN = 1568
+
+
+def _redimensionar_imagen(ruta_imagen):
+    """
+    Abre la imagen con Pillow y comprueba su ancho.
+
+    - Si el ancho supera _ANCHO_MAX_IMAGEN: reduce proporcionalmente (Image.LANCZOS),
+      convierte a RGB si tiene canal alfa (JPEG no admite transparencia) y devuelve
+      los bytes en JPEG con calidad 85 junto con "image/jpeg".
+    - Si el ancho ya cabe dentro del límite: devuelve los bytes originales tal cual
+      y el media type correspondiente a la extensión del archivo.
+
+    La imagen original en disco NO se modifica en ningún caso.
+
+    Argumentos:
+      ruta_imagen (str): Ruta al archivo de imagen (ya validada por el llamador).
+
+    Devuelve:
+      tuple[bytes, str]: (bytes_imagen, media_type).
+
+    Lanza:
+      ImportError si Pillow no está instalado.
+      ValueError  si la imagen no se puede abrir o procesar.
+    """
+    import io
+
+    # Importación diferida: solo falla si se intenta usar, no al cargar el módulo
+    try:
+        from PIL import Image
+    except ImportError:
+        raise ImportError(
+            "Pillow no está instalado. Instálalo con: python -m pip install Pillow"
+        )
+
+    # Compatibilidad con Pillow < 10 (Image.LANCZOS) y >= 10 (Image.Resampling.LANCZOS)
+    try:
+        _lanczos = Image.Resampling.LANCZOS   # Pillow >= 10
+    except AttributeError:
+        _lanczos = Image.LANCZOS              # Pillow < 10
+
+    try:
+        with Image.open(ruta_imagen) as img:
+            ancho, alto = img.size
+
+            if ancho <= _ANCHO_MAX_IMAGEN:
+                # Imagen dentro del límite: devolver bytes originales sin re-codificar
+                with open(ruta_imagen, "rb") as f:
+                    bytes_original = f.read()
+                media_type = _TIPOS_IMAGEN.get(
+                    os.path.splitext(ruta_imagen)[1].lower(), "image/jpeg"
+                )
+                return bytes_original, media_type
+
+            # Reducir proporcionalmente al ancho máximo
+            nuevo_alto   = round(alto * _ANCHO_MAX_IMAGEN / ancho)
+            img_reducida = img.resize((_ANCHO_MAX_IMAGEN, nuevo_alto), _lanczos)
+
+            # Convertir a RGB si hace falta (JPEG no admite transparencia)
+            if img_reducida.mode != "RGB":
+                img_reducida = img_reducida.convert("RGB")
+
+            # Guardar la versión reducida en memoria — nunca en disco
+            buffer = io.BytesIO()
+            img_reducida.save(buffer, format="JPEG", quality=85)
+            return buffer.getvalue(), "image/jpeg"
+
+    except (ImportError, ValueError):
+        # Re-lanzar errores ya formateados
+        raise
+    except Exception as e:
+        raise ValueError(f"No se pudo procesar la imagen para redimensionarla: {e}")
+
 
 def construir_prompt_foto(brand_kit, ideas_previas=None):
     """
@@ -919,7 +995,9 @@ def generar_ideas_flexible(brand_kit, nivel_creatividad, ruta_imagen=None,
     hay_imagen = ruta_imagen is not None
 
     # ── Preparar imagen si la hay ──────────────────────────────────────────
-    # Se lee aquí una vez y se codifica en base64 para el mensaje multimodal.
+    # _redimensionar_imagen reduce la foto a ≤1568 px de ancho con Pillow si
+    # hace falta y devuelve los bytes listos para base64. El archivo original
+    # del usuario no se toca en ningún caso.
     datos_imagen = None   # tupla (datos_b64, media_type) o None
     if hay_imagen:
         if not os.path.exists(ruta_imagen):
@@ -928,18 +1006,15 @@ def generar_ideas_flexible(brand_kit, nivel_creatividad, ruta_imagen=None,
                 "Comprueba que la ruta es correcta y que el archivo existe."
             )
         extension  = os.path.splitext(ruta_imagen)[1].lower()
-        media_type = _TIPOS_IMAGEN.get(extension)
-        if not media_type:
+        if not _TIPOS_IMAGEN.get(extension):
             raise ValueError(
                 f"Formato de imagen no soportado: '{extension}'. "
                 f"Usa uno de: {', '.join(_TIPOS_IMAGEN.keys())}."
             )
-        try:
-            with open(ruta_imagen, "rb") as f:
-                datos_b64 = base64.standard_b64encode(f.read()).decode("utf-8")
-        except OSError as e:
-            raise ValueError(f"No se pudo leer el archivo de imagen: {e}")
-        datos_imagen = (datos_b64, media_type)
+        # Redimensionar si supera el límite; si no, devuelve los bytes originales
+        bytes_img, media_type_final = _redimensionar_imagen(ruta_imagen)
+        datos_b64    = base64.standard_b64encode(bytes_img).decode("utf-8")
+        datos_imagen = (datos_b64, media_type_final)
 
     # ── Modo B: historial y ángulo gestionados internamente ────────────────
     # En los demás modos el llamador controla la anti-repetición vía ideas_previas.
