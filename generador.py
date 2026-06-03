@@ -52,6 +52,22 @@ _INSTRUCCION_JSON_COMILLAS = (
     "simples (' '). El JSON debe poder parsearse sin errores."
 )
 
+# Instrucción de calidad sobre elementos interactivos, basada en feedback de
+# community managers profesionales. Se añade a todos los prompts de generación
+# y refinamiento para que la IA no proponga el recurso «A o B» de estilo de vida,
+# considerado actualmente pasado de moda y poco original en Stories de Instagram.
+_INSTRUCCION_INTERACTIVIDAD = (
+    "\n\nCALIDAD DE ELEMENTOS INTERACTIVOS:\n"
+    "Evita proponer encuestas o mecánicas del tipo «A o B», «esto o lo otro» o "
+    "disyuntivas de estilo de vida (ej. «¿sofá o plan?», «¿terraza o sofá?», "
+    "«opción A vs opción B»). Ese recurso se considera pasado de moda y poco original.\n"
+    "Los elementos interactivos siguen siendo bienvenidos cuando aportan valor real: "
+    "encuestas con gracia propia, preguntas abiertas, deslizadores de reacción, "
+    "cuentas atrás para un evento...\n"
+    "Si ningún elemento interactivo añade valor genuino a la idea, usa «Ninguno» "
+    "en lugar de forzar una encuesta tópica."
+)
+
 
 def _nombre_a_slug(nombre_cliente):
     """
@@ -245,7 +261,7 @@ El JSON debe ser una lista de 3 objetos con exactamente esta estructura:
   }}
 ]"""
 
-    return prompt + _INSTRUCCION_JSON_COMILLAS
+    return prompt + _INSTRUCCION_INTERACTIVIDAD + _INSTRUCCION_JSON_COMILLAS
 
 
 def _llamar_api(prompt, temperatura):
@@ -266,12 +282,19 @@ def _llamar_api(prompt, temperatura):
     """
 
     # ── Leer la API key del entorno ────────────────────────────────────────
+    # os.getenv funciona en ambos contextos:
+    #   - En local: load_dotenv() (llamado al importar el módulo) carga el .env
+    #     en las variables de entorno del proceso antes de llegar aquí.
+    #   - En Streamlit Cloud: la plataforma inyecta los Secrets directamente
+    #     como variables de entorno, por lo que os.getenv los encuentra igual.
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         raise ValueError(
-            "No se encontró la clave de API de Anthropic. "
-            "Comprueba que el archivo .env existe y contiene la línea: "
-            "ANTHROPIC_API_KEY=tu-clave-aquí"
+            "No se encontró la clave de API (ANTHROPIC_API_KEY). "
+            "En local, revisa tu archivo .env y asegúrate de que contiene: "
+            "ANTHROPIC_API_KEY=tu-clave-aquí. "
+            "Si la app está publicada en Streamlit Cloud, configura la clave "
+            "en Settings → Secrets del panel de la app."
         )
 
     # ── Llamada a la API con manejo de todos los errores conocidos ─────────
@@ -462,7 +485,7 @@ El JSON debe ser un único objeto con exactamente esta estructura:
   "por_que_funciona": "Explicación breve de por qué esta idea conecta con el público"
 }}"""
 
-    return prompt + _INSTRUCCION_JSON_COMILLAS
+    return prompt + _INSTRUCCION_INTERACTIVIDAD + _INSTRUCCION_JSON_COMILLAS
 
 
 def refinar_idea(idea, peticion_cambio, nivel_creatividad="equilibradas"):
@@ -688,7 +711,7 @@ El JSON debe ser una lista de 3 objetos con exactamente esta estructura:
   }}
 ]"""
 
-    return prompt + _INSTRUCCION_JSON_COMILLAS
+    return prompt + _INSTRUCCION_INTERACTIVIDAD + _INSTRUCCION_JSON_COMILLAS
 
 
 def generar_ideas_desde_foto(ruta_imagen, brand_kit, nivel_creatividad="equilibradas",
@@ -953,7 +976,7 @@ def _construir_prompt_flexible(brand_kit, hay_imagen, descripcion=None,
         + json_template
     )
 
-    return prompt + _INSTRUCCION_JSON_COMILLAS
+    return prompt + _INSTRUCCION_INTERACTIVIDAD + _INSTRUCCION_JSON_COMILLAS
 
 
 def generar_ideas_flexible(brand_kit, nivel_creatividad, ruta_imagen=None,
