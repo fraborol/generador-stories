@@ -158,6 +158,28 @@ st.markdown("""
         background-color: var(--c-acento);
         border: none;
     }
+
+    /* ── Ocultar el icono de GitHub y el botón Fork en Streamlit Cloud ─── */
+    /* Streamlit Community Cloud añade en la toolbar dos elementos que       */
+    /* exponen el repositorio: un enlace al código fuente (icono de GitHub)  */
+    /* y un botón de "Fork". Los ocultamos con sus data-testid estables,     */
+    /* sin tocar el menú principal (tres puntos) ni el resto de la toolbar.  */
+
+    /* Contenedor del enlace "Ver código fuente" / icono de GitHub */
+    [data-testid="stToolbarActionsViewer"] {
+        display: none !important;
+    }
+
+    /* Botón de Fork */
+    [data-testid="stForkButton"] {
+        display: none !important;
+    }
+
+    /* Fallback por href: por si Streamlit cambia los testids entre versiones,
+       oculta directamente cualquier enlace a github.com dentro de la toolbar */
+    [data-testid="stToolbarActions"] a[href*="github.com"] {
+        display: none !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
