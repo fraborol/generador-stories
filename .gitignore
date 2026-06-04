@@ -11,8 +11,10 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Caché de Streamlit
+# Caché de Streamlit (se ignora la carpeta completa, excepto la configuración)
 .streamlit/
+# config.toml debe subirse a GitHub para que Streamlit Cloud lo lea
+!.streamlit/config.toml
 
 # Configuración local de herramientas de desarrollo
 .claude/

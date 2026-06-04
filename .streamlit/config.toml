@@ -1,0 +1,5 @@
+[client]
+# Oculta la barra de herramientas de desarrollador para los visitantes de la app publicada.
+# Esto elimina el icono de GitHub y el botón de Fork que aparecen en la esquina superior derecha.
+# Referencia oficial: https://docs.streamlit.io/develop/api-reference/configuration/config.toml
+toolbarMode = "viewer"
