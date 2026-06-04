@@ -48,16 +48,23 @@ st.markdown("""
         margin-bottom: 1.5rem;
     }
     .app-titulo {
-        font-size: 2.6rem;
-        font-weight: 700;
+        /* !important necesario: los estilos de Streamlit para <p> tienen mayor
+           especificidad y reducen el tamaño definido aquí sin esta declaración */
+        font-size: 2rem !important;
+        font-weight: 700 !important;
         color: var(--c-primario);
         margin: 0;
         letter-spacing: -0.5px;
+        line-height: 1.1;
+        text-align: left;
     }
     .app-subtitulo {
-        font-size: 0.9rem;
+        /* !important por la misma razón: evitar que Streamlit sobreescriba el tamaño */
+        font-size: 1rem !important;
         color: var(--c-sec);
         margin: 0.2rem 0 0 0;
+        padding-left: 0.2rem;
+        text-align: left;
     }
 
     /* ── Tarjeta de idea ───────────────────────────────────────────────── */
