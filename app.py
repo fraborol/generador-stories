@@ -13,7 +13,7 @@ from generador import (
 )
 
 # ── Identidad de la app: cambiar aquí si el nombre cambia ─────────────────────
-APP_NOMBRE    = "Copiloto"
+APP_NOMBRE    = "CoopStories"
 APP_SUBTITULO = "Generador de ideas para Stories"
 
 # ── Configuración de la página ────────────────────────────────────────────────
