@@ -68,6 +68,33 @@ _INSTRUCCION_INTERACTIVIDAD = (
     "en lugar de forzar una encuesta tópica."
 )
 
+# Definiciones de cada objetivo de marketing seleccionable en la barra lateral.
+# Se usan para construir el bloque destacado de _construir_prompt_flexible cuando
+# el objetivo es distinto de None/"general". Clave = valor interno del selector.
+_DEFINICIONES_OBJETIVO = {
+    "vender": (
+        "Vender: gancho comercial y llamada a la acción clara (oferta, reserva, "
+        "urgencia sutil). Las ideas deben empujar a comprar."
+    ),
+    "captar_leads": (
+        "Captar leads: orientadas a que el usuario deje sus datos o contacte "
+        "(apuntarse, escribir, registrarse), sin venta directa."
+    ),
+    "branding": (
+        "Branding: transmiten la personalidad y los valores de la marca, sin vender "
+        "ni pedir nada. Deben dejar una sensación y hacer la marca memorable."
+    ),
+    "engagement": (
+        "Engagement: buscan interacción (comentarios, respuestas, compartir), con "
+        "preguntas abiertas o dinámicas participativas. IMPORTANTE: sigue sin usar "
+        "encuestas tipo «elige A o B» ni disyuntivas de estilo de vida."
+    ),
+    "fidelizar": (
+        "Fidelizar: dirigidas a clientes que ya conocen la marca, con tono cercano "
+        "y de comunidad, que les hagan sentir parte de ella y quieran volver."
+    ),
+}
+
 
 def _nombre_a_slug(nombre_cliente):
     """
@@ -789,7 +816,7 @@ def generar_ideas_desde_foto(ruta_imagen, brand_kit, nivel_creatividad="equilibr
 
 def _construir_prompt_flexible(brand_kit, hay_imagen, descripcion=None,
                                 historial_conceptos=None, angulo=None,
-                                ideas_previas=None):
+                                ideas_previas=None, objetivo=None):
     """
     Construye el texto del prompt de forma modular para generar_ideas_flexible.
 
@@ -799,6 +826,8 @@ def _construir_prompt_flexible(brand_kit, hay_imagen, descripcion=None,
       historial_conceptos → anti-repetición del historial del cliente (Modo B)
       angulo              → ángulo temático (Modo B)
       ideas_previas       → anti-repetición gestionada por el llamador (A, A+, C)
+      objetivo            → objetivo de marketing opcional (todos los modos).
+                             None o "general" no añade ningún bloque al prompt.
 
     Devuelve:
       str: Texto del prompt listo para enviar a la API. La imagen, si la hay,
@@ -888,6 +917,21 @@ def _construir_prompt_flexible(brand_kit, hay_imagen, descripcion=None,
             f"ideas muy parecidas; busca enfoques claramente distintos):\n{items}"
         )
 
+    # ── Bloque de objetivo de marketing — opcional, todos los modos ────────
+    # Si objetivo es None o "general" no se añade nada y el prompt se comporta
+    # exactamente igual que antes de introducir este selector.
+    bloque_objetivo = ""
+    if objetivo and objetivo != "general":
+        definicion = _DEFINICIONES_OBJETIVO.get(objetivo)
+        if definicion:
+            bloque_objetivo = (
+                f"\n\nOBJETIVO DE MARKETING DE ESTA TANDA (DESTACADO):\n"
+                f"{definicion}\n"
+                f'Este objetivo debe condicionar especialmente el enfoque del '
+                f'"texto_en_pantalla" y el tipo de "elemento_interactivo" de cada '
+                f"una de las 3 ideas."
+            )
+
     # ── Instrucción de tarea — varía según el modo ─────────────────────────
     if hay_imagen and descripcion:
         # Modo A+: foto + tema → la foto es el vehículo, el tema el eje
@@ -968,7 +1012,8 @@ def _construir_prompt_flexible(brand_kit, hay_imagen, descripcion=None,
         f"Público objetivo: {publico}"
         f"{bloque_valores}{bloque_evitar}{bloque_contenido}"
         f"{bloque_descripcion}{bloque_imagen}"
-        f"{bloque_historial}{bloque_angulo}{bloque_previas}\n\n"
+        f"{bloque_historial}{bloque_angulo}{bloque_previas}"
+        f"{bloque_objetivo}\n\n"
         f"{tarea}\n\n"
         "INSTRUCCIONES DE FORMATO:\n"
         "Responde ÚNICAMENTE con un JSON válido, sin ningún texto adicional antes ni después.\n"
@@ -980,7 +1025,7 @@ def _construir_prompt_flexible(brand_kit, hay_imagen, descripcion=None,
 
 
 def generar_ideas_flexible(brand_kit, nivel_creatividad, ruta_imagen=None,
-                            descripcion=None, ideas_previas=None):
+                            descripcion=None, ideas_previas=None, objetivo=None):
     """
     Punto de entrada unificado para todos los modos de generación de ideas.
     Elige el modo automáticamente según los parámetros recibidos:
@@ -1002,6 +1047,10 @@ def generar_ideas_flexible(brand_kit, nivel_creatividad, ruta_imagen=None,
       ideas_previas     (list|None): Conceptos ya propuestos para evitar repeticiones.
                                      El llamador gestiona esta lista para A, A+ y C.
                                      En Modo B se ignora (el historial es interno).
+      objetivo          (str|None):  Objetivo de marketing opcional, válido en los
+                                     cuatro modos: "vender", "captar_leads", "branding",
+                                     "engagement" o "fidelizar". None o "general" no
+                                     modifica el prompt (comportamiento igual que antes).
 
     Devuelve:
       tuple[list, str|None]:
@@ -1057,6 +1106,7 @@ def generar_ideas_flexible(brand_kit, nivel_creatividad, ruta_imagen=None,
         historial_conceptos=historial_para_prompt,
         angulo=angulo_elegido,
         ideas_previas=ideas_previas,
+        objetivo=objetivo,
     )
 
     # ── Ensamblar el contenido del mensaje para la API ─────────────────────

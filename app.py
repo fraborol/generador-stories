@@ -197,6 +197,18 @@ MAPA_CREATIVIDAD = {
     "Atrevidas y originales": "atrevidas",
 }
 
+# Traducción etiqueta visible → valor interno del objetivo de marketing.
+# "General..." se mapea a None para que _construir_prompt_flexible no añada
+# ningún bloque extra al prompt (mismo comportamiento que antes del selector).
+MAPA_OBJETIVO = {
+    "General / sin objetivo específico": None,
+    "Vender":                            "vender",
+    "Captar leads":                      "captar_leads",
+    "Branding":                          "branding",
+    "Engagement":                        "engagement",
+    "Fidelizar":                         "fidelizar",
+}
+
 
 # ── Funciones auxiliares ──────────────────────────────────────────────────────
 
@@ -351,6 +363,20 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     nivel_interno = MAPA_CREATIVIDAD[nivel_etiqueta]
+
+    # Objetivo de marketing: orienta el enfoque de las ideas (texto y elemento
+    # interactivo) sin afectar a la memoria anti-repetición ni al refinado.
+    st.markdown("**Objetivo**")
+    # st.radio en vez de st.selectbox: muestra todas las opciones visibles a
+    # la vez, igual que "Nivel de creatividad". label_visibility="collapsed"
+    # oculta la etiqueta nativa porque ya la ponemos con st.markdown encima.
+    objetivo_etiqueta = st.radio(
+        "Objetivo",
+        options=list(MAPA_OBJETIVO.keys()),
+        index=0,
+        label_visibility="collapsed",
+    )
+    objetivo_interno = MAPA_OBJETIVO[objetivo_etiqueta]
 
 
 # ── Cabecera del área principal ───────────────────────────────────────────────
@@ -564,6 +590,9 @@ if generar_pulsado:
                     descripcion=desc_activa or None,
                     # En Modo B el historial es interno; en el resto usamos las previas
                     ideas_previas=st.session_state.ideas_previas_contexto or None,
+                    # El objetivo aplica a los cuatro modos (B, A, C y A+) y no
+                    # interfiere con la memoria anti-repetición ni con el refinado.
+                    objetivo=objetivo_interno,
                 )
             finally:
                 # Borrar el temporal en cualquier caso (éxito o error)
