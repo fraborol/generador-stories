@@ -54,18 +54,22 @@ _INSTRUCCION_JSON_COMILLAS = (
 
 # Instrucción de calidad sobre elementos interactivos, basada en feedback de
 # community managers profesionales. Se añade a todos los prompts de generación
-# y refinamiento para que la IA no proponga el recurso «A o B» de estilo de vida,
-# considerado actualmente pasado de moda y poco original en Stories de Instagram.
+# y refinamiento para que la IA no proponga recursos interactivos pasados de
+# moda en Stories de Instagram: ni el «A o B» de estilo de vida, ni el
+# deslizador de emoji (el "slider" para valorar algo arrastrando un emoji).
 _INSTRUCCION_INTERACTIVIDAD = (
     "\n\nCALIDAD DE ELEMENTOS INTERACTIVOS:\n"
-    "Evita proponer encuestas o mecánicas del tipo «A o B», «esto o lo otro» o "
-    "disyuntivas de estilo de vida (ej. «¿sofá o plan?», «¿terraza o sofá?», "
-    "«opción A vs opción B»). Ese recurso se considera pasado de moda y poco original.\n"
+    "Evita estos recursos interactivos por estar pasados de moda:\n"
+    "- Encuestas o mecánicas del tipo «A o B», «esto o lo otro» o disyuntivas de "
+    "estilo de vida (ej. «¿sofá o plan?», «¿terraza o sofá?», «opción A vs opción B»).\n"
+    "- El deslizador de emoji (el «slider» de Instagram donde se arrastra un "
+    "emoji para valorar algo): es un recurso en desuso que se percibe como "
+    "desfasado.\n"
     "Los elementos interactivos siguen siendo bienvenidos cuando aportan valor real: "
-    "encuestas con gracia propia, preguntas abiertas, deslizadores de reacción, "
-    "cuentas atrás para un evento...\n"
+    "preguntas abiertas, cuentas atrás para un evento, cajas de preguntas, "
+    "encuestas con gracia propia...\n"
     "Si ningún elemento interactivo añade valor genuino a la idea, usa «Ninguno» "
-    "en lugar de forzar una encuesta tópica."
+    "en lugar de forzar un recurso desfasado."
 )
 
 # Definiciones de cada objetivo de marketing seleccionable en la barra lateral.
