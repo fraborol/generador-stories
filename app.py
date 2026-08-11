@@ -1,10 +1,15 @@
 import glob
 import html
+import io
 import json
 import os
+import re
 import tempfile
+from datetime import date
 
 import streamlit as st
+from docx import Document
+from docx.shared import Pt, RGBColor
 
 from brand_kit import cargar_brand_kit
 from generador import (
@@ -14,7 +19,10 @@ from generador import (
 
 # ── Identidad de la app: cambiar aquí si el nombre cambia ─────────────────────
 APP_NOMBRE    = "CoopStories"
-APP_SUBTITULO = "Generador de ideas para Stories"
+APP_SUBTITULO = "Ideas de contenido con la voz de cada cliente"
+
+# MIME type de los documentos Word generados para las descargas .docx.
+MIME_DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 # ── Configuración de la página ────────────────────────────────────────────────
 # Debe ser la primera llamada a Streamlit del script.
@@ -209,6 +217,16 @@ MAPA_OBJETIVO = {
     "Fidelizar":                         "fidelizar",
 }
 
+# Traducción código de modo interno ("B"/"A"/"C"/"A+") → etiqueta legible.
+# Coincide con los nombres de las pestañas. Se usa solo para la cabecera de
+# los .txt descargables, no afecta a la generación.
+MAPA_MODO_ETIQUETA = {
+    "B":  "Lluvia de ideas",
+    "A":  "Desde una foto",
+    "C":  "Desde un tema",
+    "A+": "Foto + tema",
+}
+
 
 # ── Funciones auxiliares ──────────────────────────────────────────────────────
 
@@ -306,6 +324,126 @@ def renderizar_idea_refinada(idea):
     """, unsafe_allow_html=True)
 
 
+def formatear_idea_texto(idea, prefijo="IDEA"):
+    """
+    Da formato a una idea como texto plano legible, para descargar en .txt.
+    Usa las mismas etiquetas y el mismo criterio de campo (tratamiento_imagen
+    vs. tipo_contenido_sugerido) que las tarjetas visuales, así el texto
+    descargado coincide con lo que se ve en pantalla.
+    """
+    numero   = idea.get("idea", "?")
+    concepto = idea.get("concepto", "—")
+    texto    = idea.get("texto_en_pantalla", "—")
+    elemento = idea.get("elemento_interactivo", "—")
+    por_que  = idea.get("por_que_funciona", "—")
+
+    if "tratamiento_imagen" in idea:
+        etiqueta_formato = "TRATAMIENTO DE LA IMAGEN"
+        que_grabar = idea.get("tratamiento_imagen", "—")
+    else:
+        etiqueta_formato = "QUÉ GRABAR"
+        que_grabar = idea.get("tipo_contenido_sugerido", "—")
+
+    titulo = f"{prefijo} {numero}"
+    return (
+        f"{titulo}\n"
+        f"{'-' * len(titulo)}\n\n"
+        f"CONCEPTO\n{concepto}\n\n"
+        f"TEXTO EN PANTALLA\n{texto}\n\n"
+        f"{etiqueta_formato}\n{que_grabar}\n\n"
+        f"ELEMENTO INTERACTIVO\n{elemento}\n\n"
+        f"POR QUÉ FUNCIONA\n{por_que}\n"
+    )
+
+
+def construir_texto_tanda(ideas, cliente, modo_etiqueta=None, objetivo_etiqueta=None):
+    """
+    Construye el contenido del .txt para descargar las 3 ideas de una tanda
+    juntas: una cabecera con el contexto de la generación (cliente y, si
+    aplica, modo y objetivo) seguida de cada idea formateada, separadas por
+    una línea divisoria.
+    """
+    lineas_cabecera = [f"Cliente: {cliente}"]
+    if modo_etiqueta:
+        lineas_cabecera.append(f"Modo: {modo_etiqueta}")
+    if objetivo_etiqueta:
+        lineas_cabecera.append(f"Objetivo: {objetivo_etiqueta}")
+    cabecera = "\n".join(lineas_cabecera)
+
+    separador = "\n\n" + ("=" * 48) + "\n\n"
+    bloques   = [formatear_idea_texto(idea) for idea in ideas]
+
+    return cabecera + "\n\n" + separador.join(bloques) + "\n"
+
+
+def _nombre_archivo_seguro(texto):
+    """
+    Convierte un texto libre (p. ej. el nombre del cliente) en un fragmento
+    válido para nombre de archivo: sin espacios ni caracteres especiales.
+    """
+    limpio = re.sub(r"[^\w\-]+", "_", texto, flags=re.UNICODE).strip("_")
+    return limpio or "cliente"
+
+
+def construir_docx_ideas(ideas, cliente, modo_etiqueta=None, objetivo_etiqueta=None):
+    """
+    Construye un documento Word (.docx) en memoria con una o varias ideas:
+    título con el cliente, línea de contexto (fecha y, si aplica, modo y
+    objetivo) y cada idea con su número como subtítulo y sus campos
+    etiquetados en negrita. Sirve tanto para la tanda completa (varias
+    ideas) como para la descarga de una idea suelta (lista de una sola).
+
+    Devuelve los bytes del documento, listos para pasar a st.download_button
+    (se genera en memoria con io.BytesIO, sin tocar el disco).
+    """
+    documento = Document()
+
+    documento.add_heading(f"Ideas de contenido — {cliente}", level=1)
+
+    # Línea de contexto en gris y tamaño reducido, debajo del título.
+    partes_contexto = [f"Generado el {date.today().strftime('%d/%m/%Y')}"]
+    if modo_etiqueta:
+        partes_contexto.append(f"Modo: {modo_etiqueta}")
+    if objetivo_etiqueta:
+        partes_contexto.append(f"Objetivo: {objetivo_etiqueta}")
+    parrafo_contexto = documento.add_paragraph(" · ".join(partes_contexto))
+    for run in parrafo_contexto.runs:
+        run.font.size = Pt(9)
+        run.font.color.rgb = RGBColor(0x6B, 0x72, 0x80)  # gris, mismo tono que --c-sec del CSS
+
+    for idea in ideas:
+        numero = idea.get("idea", "?")
+        documento.add_heading(f"Idea {numero}", level=2)
+
+        # Mismo criterio que renderizar_idea() y formatear_idea_texto(): el
+        # campo presente en la idea determina la etiqueta a mostrar.
+        if "tratamiento_imagen" in idea:
+            etiqueta_formato = "Tratamiento de la imagen"
+            que_grabar = idea.get("tratamiento_imagen", "—")
+        else:
+            etiqueta_formato = "Qué grabar"
+            que_grabar = idea.get("tipo_contenido_sugerido", "—")
+
+        campos = [
+            ("Concepto",             idea.get("concepto", "—")),
+            ("Texto en pantalla",    idea.get("texto_en_pantalla", "—")),
+            (etiqueta_formato,       que_grabar),
+            ("Elemento interactivo", idea.get("elemento_interactivo", "—")),
+            ("Por qué funciona",     idea.get("por_que_funciona", "—")),
+        ]
+        for etiqueta, valor in campos:
+            parrafo = documento.add_paragraph()
+            run_etiqueta = parrafo.add_run(f"{etiqueta}: ")
+            run_etiqueta.bold = True
+            parrafo.add_run(str(valor))
+
+        documento.add_paragraph()  # línea en blanco de separación entre ideas
+
+    buffer = io.BytesIO()
+    documento.save(buffer)
+    return buffer.getvalue()
+
+
 # ── Inicialización del session_state ──────────────────────────────────────────
 # Streamlit reejecuta el script completo en cada interacción del usuario.
 # session_state es un diccionario que persiste entre esas reejucuciones.
@@ -318,6 +456,17 @@ if "ideas_refinadas" not in st.session_state:
     # Diccionario {índice_idea (0/1/2): dict con la última versión refinada}.
     # Permite encadenar refinamientos: cada petición parte del resultado anterior.
     st.session_state.ideas_refinadas = {}
+
+# Metadatos de la tanda actual de ideas (cliente, modo y objetivo usados en su
+# generación). Se guardan aparte de los controles de la sidebar para que las
+# cabeceras de los .txt descargables reflejen lo que realmente se generó,
+# aunque el usuario cambie de cliente u objetivo en la sidebar después.
+if "ideas_cliente" not in st.session_state:
+    st.session_state.ideas_cliente = None
+if "ideas_modo_etiqueta" not in st.session_state:
+    st.session_state.ideas_modo_etiqueta = None
+if "ideas_objetivo_etiqueta" not in st.session_state:
+    st.session_state.ideas_objetivo_etiqueta = None
 
 # Clave de contexto y lista de ideas previas para la anti-repetición (Modos A, C, A+).
 # contexto_id = tupla (modo, foto_part, desc_part) que identifica el contexto actual.
@@ -615,11 +764,25 @@ if generar_pulsado:
         st.session_state.angulo_usado    = angulo   # None en todos los modos salvo B
         st.session_state.ideas_refinadas = {}
 
+        # Metadatos de esta tanda, usados solo para las cabeceras de los .txt
+        # descargables (no afectan a la generación ni al refinado).
+        st.session_state.ideas_cliente           = nombre_seleccionado
+        st.session_state.ideas_modo_etiqueta     = MAPA_MODO_ETIQUETA.get(modo_activo)
+        st.session_state.ideas_objetivo_etiqueta = objetivo_etiqueta if objetivo_interno else None
+
         # Forzar rerun para que el botón se redibuje con el texto correcto al instante
         st.rerun()
 
     except (ValueError, ConnectionError, FileNotFoundError) as e:
-        st.error(f"No se han podido generar las ideas. Detalle del error:\n\n{e}")
+        # Mensaje humano en primer plano; el detalle técnico queda plegado
+        # en un expander para no asustar al usuario pero seguir accesible.
+        st.error(
+            "Algo no ha ido bien al generar las ideas. Prueba de nuevo en "
+            "un momento; si sigue pasando, puede ser un problema temporal "
+            "de conexión."
+        )
+        with st.expander("Ver detalle técnico"):
+            st.write(str(e))
 
 
 # ── Área de resultados: bienvenida o ideas ───────────────────────────────────
@@ -630,8 +793,9 @@ if not st.session_state.ideas:
     <div class="bienvenida">
         <div class="bienvenida-titulo">Elige cómo quieres empezar</div>
         <div class="bienvenida-desc">
-            Selecciona una pestaña según lo que tengas: una foto, un tema,
-            ambas cosas, o deja que el generador sorprenda con ideas variadas.
+            Elige una pestaña según lo que tengas a mano: una foto, un tema
+            concreto, ambas cosas, o nada —y deja que la herramienta te
+            proponga ideas desde cero.
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -643,10 +807,62 @@ else:
         st.caption(f"Ángulo temático: {st.session_state.angulo_usado}")
 
     # Las 3 ideas en columnas de igual ancho (aprovecha el layout wide)
-    columnas = st.columns(3, gap="medium")
+    columnas   = st.columns(3, gap="medium")
+    nombre_archivo_cliente = _nombre_archivo_seguro(
+        st.session_state.ideas_cliente or nombre_seleccionado
+    )
     for col, idea in zip(columnas, st.session_state.ideas):
         with col:
             renderizar_idea(idea)
+            # Descarga de esta idea concreta como .txt o como .docx.
+            numero_idea = idea.get("idea", "?")
+            st.download_button(
+                "Descargar esta idea (.txt)",
+                data=formatear_idea_texto(idea),
+                file_name=f"idea_{nombre_archivo_cliente}_{numero_idea}.txt",
+                mime="text/plain",
+                use_container_width=True,
+                key=f"descarga_idea_{numero_idea}",
+            )
+            st.download_button(
+                "Descargar esta idea (.docx)",
+                data=construir_docx_ideas(
+                    [idea],
+                    st.session_state.ideas_cliente or nombre_seleccionado,
+                    st.session_state.ideas_modo_etiqueta,
+                    st.session_state.ideas_objetivo_etiqueta,
+                ),
+                file_name=f"idea_{nombre_archivo_cliente}_{numero_idea}.docx",
+                mime=MIME_DOCX,
+                use_container_width=True,
+                key=f"descarga_idea_docx_{numero_idea}",
+            )
+
+    # Descarga de las 3 ideas de la tanda juntas en un único .txt o .docx.
+    st.download_button(
+        "Descargar las 3 ideas (.txt)",
+        data=construir_texto_tanda(
+            st.session_state.ideas,
+            st.session_state.ideas_cliente or nombre_seleccionado,
+            st.session_state.ideas_modo_etiqueta,
+            st.session_state.ideas_objetivo_etiqueta,
+        ),
+        file_name=f"ideas_{nombre_archivo_cliente}.txt",
+        mime="text/plain",
+        use_container_width=True,
+    )
+    st.download_button(
+        "Descargar las 3 ideas (.docx)",
+        data=construir_docx_ideas(
+            st.session_state.ideas,
+            st.session_state.ideas_cliente or nombre_seleccionado,
+            st.session_state.ideas_modo_etiqueta,
+            st.session_state.ideas_objetivo_etiqueta,
+        ),
+        file_name=f"ideas_{nombre_archivo_cliente}.docx",
+        mime=MIME_DOCX,
+        use_container_width=True,
+    )
 
     # ── Sección de refinamiento ───────────────────────────────────────────
     st.divider()
@@ -696,7 +912,14 @@ else:
                 st.session_state.ideas_refinadas[idx_seleccionado] = idea_revisada
 
             except (ValueError, ConnectionError) as e:
-                st.error(f"No se ha podido refinar la idea. Detalle del error:\n\n{e}")
+                # Mismo tratamiento que en la generación: mensaje humano
+                # arriba, detalle técnico plegado en un expander.
+                st.error(
+                    "No se ha podido aplicar el cambio. Inténtalo otra vez "
+                    "en un momento."
+                )
+                with st.expander("Ver detalle técnico"):
+                    st.write(str(e))
 
     # Mostramos la versión refinada si existe para la idea actualmente seleccionada.
     # Se renderiza en cada rerun de Streamlit gracias a que está en session_state.
